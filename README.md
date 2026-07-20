@@ -13,7 +13,6 @@ Every asset in the tables below is annotated with one of:
 |---|---|
 | Available | The file is present in this folder and matches the name used in the book. |
 | Planned | The file is referenced in the book but is not yet present in this folder. |
-| Rename pending | The file is present under a different name and a rename is queued. See `ASSET_AUDIT_REPORT.md`. |
 
 A full audit of referenced vs. present assets, naming inconsistencies, and structural recommendations is captured in `ASSET_AUDIT_REPORT.md` in this folder.
 
