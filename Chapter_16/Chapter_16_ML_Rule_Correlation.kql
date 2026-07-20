@@ -1,0 +1,24 @@
+// Correlate ML anomalies with rule-based detections
+// High-confidence alerts: ML anomaly + rule match on the same asset within 1 hour
+let MLAnomalies = OT_ML_Anomalies_CL
+| where TimeGenerated > ago(1h)
+| where AnomalyScore > 0.7
+| project MLTime = TimeGenerated, AssetIdentifier, AnomalyType,
+AnomalyScore, AnomalyDescription;
+let RuleAlerts = SecurityAlert
+| where TimeGenerated > ago(1h)
+| where ProductName == "Azure Sentinel"
+| extend AlertEntities = parse_json(Entities)
+| mv-expand AlertEntities
+| where AlertEntities.Type == "ip"
+| extend AlertAsset = tostring(AlertEntities.Address)
+| project AlertTime = TimeGenerated, AlertName, AlertSeverity, AlertAsset;
+MLAnomalies
+| join kind=inner RuleAlerts on $left.AssetIdentifier ==
+$right.AlertAsset
+| where abs(datetime_diff('minute', MLTime, AlertTime)) <= 60
+| extend CombinedSeverity = iff(AlertSeverity == "High" and AnomalyScore > 0.8,
+"Critical", AlertSeverity)
+| project MLTime, AlertTime, AssetIdentifier, AnomalyType, AnomalyScore,
+AlertName, AlertSeverity, CombinedSeverity, AnomalyDescription
+| sort by CombinedSeverity desc, AnomalyScore desc

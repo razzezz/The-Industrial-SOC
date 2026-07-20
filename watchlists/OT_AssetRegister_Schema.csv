@@ -1,0 +1,55 @@
+# OT_AssetRegister Sentinel Watchlist Schema
+# ================================================================
+# Description: Core OT asset inventory watchlist for Microsoft
+#   Sentinel. Provides device identity, network identity,
+#   operational context, security posture, and crown jewel
+#   classification for every OT asset. Referenced by all
+#   detection use cases (UC-ICS-001 through UC-ICS-013) for
+#   alert enrichment and dynamic severity assignment.
+#
+# Usage: Populated through the asset inventory process described
+#   in Chapter 6. Maintained as a living document, updated as
+#   assets are added, modified, or decommissioned. Import into
+#   Microsoft Sentinel as watchlist named "OT_AssetRegister".
+#
+# Watchlist Name: OT_AssetRegister
+# SearchKey: IPAddress
+# ================================================================
+
+# Schema Fields:
+# ----------------------------------------------------------------
+# Hostname           : string  — Device hostname (if applicable)
+# IPAddress          : string  — Primary IP address (SearchKey)
+# MACAddress         : string  — MAC address
+# VLAN               : string  — VLAN assignment
+# PurdueLevel        : string  — Purdue Model level (L0, L1, L2, L3, L3.5, L4, L5)
+# DeviceType         : string  — PLC, RTU, HMI, EWS, Historian, SCADA, DCS, SIS, Firewall, Switch, Server, Other
+# Manufacturer       : string  — Device manufacturer
+# Model              : string  — Device model
+# FirmwareVersion    : string  — Current firmware version
+# OS                 : string  — Operating system (for Windows-based systems)
+# ProcessFunction    : string  — Physical process or sub-process supported
+# CrownJewelTier     : int     — Crown jewel tier (1-5, where 1 is highest criticality)
+# SafetyImpact       : int     — Safety impact score (0-10)
+# EngineeringOwner   : string  — Responsible engineering team or individual
+# VendorSupport      : string  — Active, Limited, End-of-Life, Unsupported
+# EDRDeployed        : bool    — Whether EDR agent is installed
+# EDRCapable         : bool    — Whether the device can support EDR
+# LogForwarding      : string  — Active, Partial, None
+# Protocols          : string  — ICS protocols used (comma-separated)
+# LastVerified       : date    — Date the entry was last verified accurate
+# Notes              : string  — Additional context
+
+# Sample CSV for watchlist import:
+# ================================================================
+Hostname,IPAddress,MACAddress,VLAN,PurdueLevel,DeviceType,Manufacturer,Model,FirmwareVersion,OS,ProcessFunction,CrownJewelTier,SafetyImpact,EngineeringOwner,VendorSupport,EDRDeployed,EDRCapable,LogForwarding,Protocols,LastVerified,Notes
+PLC_WaterTreat_01,10.1.1.10,00:1A:2B:3C:4D:01,VLAN101,L1,PLC,Siemens,S7-1500,V2.9.4,,Chlorination dosing control,1,10,Engineering Team Alpha,Active,false,false,None,"S7Comm,Profinet",2026-01-15,Primary chlorination PLC - safety critical
+PLC_WaterTreat_02,10.1.1.11,00:1A:2B:3C:4D:02,VLAN101,L1,PLC,Siemens,S7-1500,V2.9.4,,Filtration control,2,4,Engineering Team Alpha,Active,false,false,None,"S7Comm,Profinet",2026-01-15,Backup filtration controller
+SIS_ESD_01,10.1.1.20,00:1A:2B:3C:4D:03,VLAN102,L1,SIS,Schneider Electric,Triconex 3008,V11.3,,Emergency shutdown - Boiler Unit 3,1,10,Engineering Team Beta,Active,false,false,None,Proprietary,2026-01-15,Safety system - highest priority
+HMI_ControlRoom_01,10.1.2.10,00:1A:2B:3C:4D:10,VLAN201,L2,HMI,Siemens,WinCC,V7.5 SP2,Windows 10 LTSC 2021,Operator interface - Plant A,3,2,Engineering Team Alpha,Active,true,true,Active,"OPC-UA,S7Comm",2026-01-15,Primary operator HMI
+HMI_ControlRoom_02,10.1.2.11,00:1A:2B:3C:4D:11,VLAN201,L2,HMI,Siemens,WinCC,V7.5 SP2,Windows 10 LTSC 2021,Operator interface - Plant A backup,3,2,Engineering Team Alpha,Active,true,true,Active,"OPC-UA,S7Comm",2026-01-15,Backup operator HMI
+EWS_Eng_01,10.1.3.50,00:1A:2B:3C:4D:50,VLAN301,L3,EWS,Dell,OptiPlex 7090,,Windows 10 Enterprise,Engineering workstation - Siemens Step 7,4,0,Engineering Team Alpha,Active,true,true,Active,"S7Comm,OPC-UA",2026-01-15,Primary engineering workstation
+HIST_01,10.1.3.30,00:1A:2B:3C:4D:30,VLAN301,L3,Historian,OSIsoft,PI Server,2023,,Process data archival - all plant data,3,0,Engineering Team Alpha,Active,true,true,Active,OPC-UA,2026-01-15,Central historian
+SCADA_01,10.1.3.20,00:1A:2B:3C:4D:20,VLAN301,L3,SCADA,Siemens,WinCC OA,V3.19,Windows Server 2022,SCADA server - Plant A,3,3,Engineering Team Alpha,Active,true,true,Active,"OPC-UA,S7Comm",2026-01-15,Primary SCADA server
+FW_IDMZ_01,10.1.100.1,00:1A:2B:3C:4D:A0,VLAN1000,L3.5,Firewall,Palo Alto,PA-850,,PAN-OS 11.1,IDMZ boundary firewall,5,0,IT Security,Active,false,false,Active,,2026-01-15,IDMZ boundary - critical monitoring point
+JUMP_01,10.1.100.10,00:1A:2B:3C:4D:A1,VLAN1000,L3.5,Server,Dell,PowerEdge R750,,Windows Server 2022,IDMZ jump server,5,0,IT Security,Active,true,true,Active,,2026-01-15,Controlled access point for OT remote access

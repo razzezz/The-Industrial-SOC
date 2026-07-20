@@ -1,0 +1,163 @@
+// UC-IR-001: OT Incident Enrichment Query
+// ================================================================
+// Description: Enriches OT-related incidents with asset register
+//   context and maintenance window status. Used within Sentinel
+//   automation rules to provide immediate operational context to
+//   triaging analysts.
+//
+// Usage: Deploy as a Sentinel automation rule (Logic App or 
+//   Automation Rule) triggered on incident creation. The rule
+//   checks incident entities against the OT_AssetRegister and
+//   OT_MaintenanceWindows watchlists and appends enrichment
+//   data to the incident.
+//
+// Data Sources:
+//   - OT_AssetRegister watchlist (Chapter 6)
+//   - OT_MaintenanceWindows watchlist (Chapter 6)
+//   - Incident entities (IP addresses from triggering alerts)
+//
+// Reference: Chapter 11 — Purpose-Built Incident Response
+// ATT&CK for ICS: Supports all techniques — enrichment is universal
+// ================================================================
+
+// -------------------------------------------------------------------
+// PART 1: Asset Register Enrichment
+// Given an IP address from an incident entity, retrieve full OT context
+// -------------------------------------------------------------------
+let IncidentIP = "<INCIDENT_ENTITY_IP>";  // Populated by automation rule
+let AssetContext = _GetWatchlist('OT_AssetRegister')
+    | where IPAddress == IncidentIP
+    | project 
+        Hostname,
+        IPAddress,
+        PurdueLevel,
+        CrownJewelTier,
+        DeviceType,
+        ProcessFunction,
+        EngineeringOwner,
+        Location,
+        Vendor,
+        Model,
+        FirmwareVersion,
+        LastMaintenanceDate,
+        CommunicationBaseline
+    | take 1;
+// Output: Asset context for incident tagging and analyst enrichment
+
+// -------------------------------------------------------------------
+// PART 2: Active Maintenance Window Check
+// Determine if the affected asset or source IP is covered by an
+// active maintenance window at the time of the incident
+// -------------------------------------------------------------------
+let CurrentTime = now();
+let MaintenanceContext = _GetWatchlist('OT_MaintenanceWindows')
+    | where Status == "Active"
+    | where StartTime <= CurrentTime and EndTime >= CurrentTime
+    | mv-expand AffectedAsset = split(AffectedAssets, ";") to typeof(string)
+    | mv-expand ExpectedSrcIP = split(ExpectedSourceIPs, ",") to typeof(string)
+    | extend AffectedAsset = trim(" ", AffectedAsset)
+    | extend ExpectedSrcIP = trim(" ", ExpectedSrcIP)
+    | where AffectedAsset == IncidentIP or ExpectedSrcIP == IncidentIP
+    | project 
+        MaintenanceID,
+        Description,
+        EngineerName,
+        ChangeRequestRef,
+        StartTime,
+        EndTime,
+        ExpectedProtocols,
+        PurdueLevel
+    | take 1;
+// Output: Maintenance window context (empty if no active window matches)
+
+// -------------------------------------------------------------------
+// PART 3: Communication Baseline Check
+// Retrieve the known communication partners for the affected asset
+// from the last 30 days of ASIM NetworkSession data
+// -------------------------------------------------------------------
+let BaselinePeriod = 30d;
+let CommunicationBaseline = _Im_NetworkSession
+    | where TimeGenerated > ago(BaselinePeriod)
+    | where SrcIpAddr == IncidentIP or DstIpAddr == IncidentIP
+    | summarize 
+        DistinctPeers = dcount(iff(SrcIpAddr == IncidentIP, DstIpAddr, SrcIpAddr)),
+        DistinctProtocols = make_set(NetworkProtocol),
+        DistinctDstPorts = make_set(DstPortNumber),
+        FirstSeen = min(TimeGenerated),
+        LastSeen = max(TimeGenerated),
+        TotalSessions = count()
+    | project
+        DistinctPeers,
+        DistinctProtocols,
+        DistinctDstPorts,
+        FirstSeen,
+        LastSeen,
+        TotalSessions;
+// Output: Baseline communication profile for the affected asset
+
+// -------------------------------------------------------------------
+// PART 4: Recent Alert History
+// Check if this asset has had other alerts in the past 7 days
+// -------------------------------------------------------------------
+let RecentAlerts = SecurityAlert
+    | where TimeGenerated > ago(7d)
+    | where Entities has IncidentIP
+    | summarize
+        AlertCount = count(),
+        AlertNames = make_set(AlertName),
+        EarliestAlert = min(TimeGenerated),
+        LatestAlert = max(TimeGenerated)
+    | project
+        AlertCount,
+        AlertNames,
+        EarliestAlert,
+        LatestAlert;
+// Output: Recent alert history for correlation
+
+// -------------------------------------------------------------------
+// AUTOMATION RULE ACTIONS (Pseudo-code)
+// Based on the enrichment results above, the automation rule should:
+// -------------------------------------------------------------------
+//
+// 1. IF AssetContext returns results:
+//    a. Add tag: "OT-Environment"
+//    b. Add tag: "Purdue-{PurdueLevel}"
+//    c. Add tag: "CrownJewel-{CrownJewelTier}"
+//    d. Add comment with full asset context
+//
+// 2. IF CrownJewelTier == "Tier1":
+//    a. Set incident severity = Critical
+//    b. Assign to OT SOC queue
+//    c. Add task: "IMMEDIATE: Escalate to OT SME and Safety Engineer"
+//    d. Add task: "IMMEDIATE: Notify Engineering Liaison"
+//
+// 3. IF CrownJewelTier == "Tier2":
+//    a. Set incident severity = High
+//    b. Assign to OT SOC queue
+//    c. Add task: "Escalate to OT SME within 30 minutes"
+//
+// 4. IF CrownJewelTier IN ("Tier3", "Tier4", "Tier5"):
+//    a. Set incident severity based on original alert severity
+//    b. Add task: "Consult OT SME for operational context"
+//
+// 5. IF MaintenanceContext returns results:
+//    a. Add tag: "MaintenanceWindow-Active"
+//    b. Add comment: "Active maintenance window: {MaintenanceID} - 
+//       {Description} by {EngineerName} (CR: {ChangeRequestRef}).
+//       Expected protocols: {ExpectedProtocols}. 
+//       Window closes: {EndTime}"
+//    c. Add task: "Correlate alert activity with maintenance scope"
+//
+// 6. IF MaintenanceContext returns NO results AND PurdueLevel <= "L2":
+//    a. Add tag: "NoMaintenanceWindow"
+//    b. Add task: "Confirm with Engineering Liaison: is this activity expected?"
+//
+// 7. IF RecentAlerts.AlertCount > 3:
+//    a. Add tag: "RecurringAlerts"
+//    b. Add comment: "{AlertCount} alerts on this asset in past 7 days"
+//    c. Add task: "Review alert cluster for potential campaign"
+//
+// 8. FOR ALL OT incidents:
+//    a. Add task: "Check OT_MaintenanceWindows for active maintenance"
+//    b. Add task: "Verify asset criticality and communication baseline"
+//    c. IF PurdueLevel <= "L2": Add task: "Consult OT SME"

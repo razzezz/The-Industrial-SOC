@@ -1,0 +1,148 @@
+// Hunt-CTI-001: Anomalous Access to OT Documentation Repositories
+// ================================================================
+// Chapter Reference: Chapter 10 — Cyber-Physical Intelligence
+// Intelligence Source: CISA Advisory AA24-038A (Volt Typhoon)
+// Hypothesis: An adversary has accessed OT network documentation
+//   (network diagrams, PLC project files, configuration backups) from
+//   file shares using compromised engineering credentials, as part of
+//   pre-attack reconnaissance.
+// ATT&CK for ICS: T0802 (Automated Collection), T0840 (Network
+//   Connection Enumeration — via documentation rather than scanning)
+// ATT&CK Enterprise: T1039 (Data from Network Shared Drive)
+// Kill Chain: Stage 1 — Collection / Reconnaissance
+// Data Source: Windows Security Event Log (Event ID 5145 — Network
+//   Share Object Access)
+// ================================================================
+//
+// DESCRIPTION:
+// Volt Typhoon has been documented exfiltrating OT network
+// documentation from file shares during the reconnaissance phase of
+// campaigns targeting critical infrastructure. This hunting query
+// identifies accounts that have accessed OT documentation repositories
+// for the first time during the lookback period — a potential indicator
+// of adversary reconnaissance using compromised credentials.
+//
+// PREREQUISITES:
+// - Windows Audit Policy: Object Access > Audit Detailed File Share
+//   must be enabled on file servers hosting OT documentation
+// - Security Event logs from file servers forwarded to Sentinel
+// - OT documentation share paths defined in OTDocShares variable
+//
+// ANALYST INVESTIGATION GUIDE:
+// For each result returned:
+// 1. Identify the account: Is this a known engineer, contractor, or
+//    IT administrator? Check with OT engineering and HR.
+// 2. Check the source IP: Does it originate from an expected workstation
+//    or an unusual system?
+// 3. Review the files accessed: Are they targeting specific high-value
+//    documentation (network diagrams, PLC configurations)?
+// 4. Check temporal patterns: Was the access during business hours or
+//    during off-hours (Volt Typhoon operates 02:00–05:00 local time)?
+// 5. Correlate with other indicators: Check for credential extraction
+//    tool execution (CTI-ICS-001), IDMZ traversal (UC-ICS-003), or
+//    other anomalous authentication on the same account.
+//
+// FALSE POSITIVE CONSIDERATIONS:
+// - New employees or contractors with legitimate access
+// - IT administrators performing backup or migration operations
+// - Auditors or compliance personnel reviewing OT documentation
+// Mitigation: Validate each finding with OT engineering. Document
+//   confirmed legitimate access to build the baseline for future hunts.
+// ================================================================
+
+let LookbackPeriod = 30d;
+let BaselinePeriod = 90d;
+
+// Step 1: Define OT documentation share paths
+// CUSTOMISATION REQUIRED: Replace these paths with the actual file
+// share paths in your environment that contain OT engineering
+// documentation, network diagrams, PLC project files, and
+// configuration backups.
+let OTDocShares = dynamic([
+    "\\\\fileserver\\OT-Engineering",
+    "\\\\fileserver\\SCADA-Config",
+    "\\\\fileserver\\PLC-Projects",
+    "\\\\fileserver\\Network-Diagrams",
+    "\\\\fileserver\\Control-System-Docs"
+]);
+
+// Step 2: Build historical baseline of legitimate access
+// Identifies all accounts that have accessed these shares in the
+// baseline period (prior to the lookback window). These are established
+// users whose access pattern is known.
+let BaselineUsers = SecurityEvent
+    | where TimeGenerated between (ago(BaselinePeriod) .. ago(LookbackPeriod))
+    | where EventID == 5145  // Detailed File Share audit
+    | where ShareName has_any (OTDocShares)
+    | distinct SubjectUserName;
+
+// Step 3: Identify access during lookback by non-baseline users
+// These are accounts that have NOT previously accessed OT documentation
+// shares but have done so during the hunting lookback period.
+let NewAccessors = SecurityEvent
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where EventID == 5145
+    | where ShareName has_any (OTDocShares)
+    | where SubjectUserName !in (BaselineUsers)
+    // Exclude computer accounts and common service accounts
+    | where SubjectUserName !endswith "$"
+    | where SubjectUserName !in ("SYSTEM", "LOCAL SERVICE", "NETWORK SERVICE")
+    | summarize
+        FirstAccess = min(TimeGenerated),
+        LastAccess = max(TimeGenerated),
+        AccessCount = count(),
+        FilesAccessed = dcount(RelativeTargetName),
+        UniqueShares = dcount(ShareName),
+        FileList = make_set(RelativeTargetName, 25),
+        ShareList = make_set(ShareName, 10),
+        SourceIPs = make_set(IpAddress, 5)
+        by SubjectUserName, SubjectDomainName
+    | sort by AccessCount desc;
+
+// Step 4: Enrich with temporal analysis
+// Identify whether access occurred during suspicious hours
+// (Volt Typhoon documented operating 02:00–05:00 local time)
+let TemporalAnalysis = SecurityEvent
+    | where TimeGenerated > ago(LookbackPeriod)
+    | where EventID == 5145
+    | where ShareName has_any (OTDocShares)
+    | where SubjectUserName !in (BaselineUsers)
+    | where SubjectUserName !endswith "$"
+    | extend HourOfDay = hourofday(TimeGenerated)
+    | extend IsOffHours = HourOfDay between (22 .. 23)
+        or HourOfDay between (0 .. 6)
+    | summarize
+        OffHoursAccess = countif(IsOffHours),
+        BusinessHoursAccess = countif(not(IsOffHours)),
+        AccessHours = make_set(HourOfDay)
+        by SubjectUserName;
+
+// Step 5: Combine results
+NewAccessors
+| join kind=leftouter (TemporalAnalysis) on SubjectUserName
+| project
+    SubjectUserName,
+    SubjectDomainName,
+    FirstAccess,
+    LastAccess,
+    AccessCount,
+    FilesAccessed,
+    UniqueShares,
+    OffHoursAccess,
+    BusinessHoursAccess,
+    AccessHours,
+    SourceIPs,
+    ShareList,
+    FileList
+// Flag highest-priority findings
+| extend Priority = case(
+    OffHoursAccess > 0 and FilesAccessed > 5, "Critical — Off-hours bulk access",
+    FilesAccessed > 10, "High — Bulk documentation access",
+    OffHoursAccess > 0, "High — Off-hours access",
+    UniqueShares > 2, "Medium — Multi-share access",
+    "Low — Single access event"),
+    HuntID = "Hunt-CTI-001",
+    Hypothesis = "Adversary accessing OT documentation for pre-attack reconnaissance",
+    IntelligenceSource = "CISA AA24-038A (Volt Typhoon)",
+    ATTACKforICS = "T0802 (Automated Collection)"
+| sort by Priority asc, AccessCount desc

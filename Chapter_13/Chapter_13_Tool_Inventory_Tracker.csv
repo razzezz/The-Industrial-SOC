@@ -1,0 +1,11 @@
+ToolName,Vendor,Version,CapabilityTier,PrimaryCapability,SecondaryCapabilities,DeploymentScope,PurdyeLevelsCovered,SitesCovered,SIEMIntegrationStatus,SIEMConnectorType,ASIMParserStatus,ActiveDetectionRules,ATTCKTechniquesDetected,LicenceModel,LicenceExpiryDate,AnnualCost,HardwareCost,ResponsibleOwner,BackupOwner,LastHealthCheck,HealthCheckScore,Notes
+Microsoft Sentinel,Microsoft,,Tier1,SIEM and Correlation,"Detection, Hunting, Automation, TI",All sites,L0-L5 (via log sources),All,N/A - is the SIEM,N/A,N/A,,,SaaS Subscription,,,,,,,,Central SIEM platform
+Microsoft Defender for Endpoint,Microsoft,,Tier1,EDR/ITDR,"Process visibility, Containment, Forensics",Engineering workstations and HMIs,L3-L4,,Native connector,Native,Native,,,Per-device licence,,,,,,,,
+Zeek (with ICSNPP),Open Source,,Tier1,Network Monitoring,"Protocol parsing, Asset discovery, Behavioural analysis",IDMZ boundary sensors,L2-L3.5,,Custom (Filebeat/AMA),Custom ASIM parsers required,Custom,,,Free (open source),,,,,,,,Requires engineering effort for deployment and parser development
+Suricata,Open Source,,Tier1,Network IDS,"Signature detection, Protocol analysis",IDMZ boundary sensors,L2-L3.5,,Custom (Filebeat/AMA),Custom ASIM parsers required,Custom,,,Free (open source),,,,,,,,ET Open ruleset plus custom ICS rules
+Microsoft Defender for IoT,Microsoft,,Tier1,OT Asset Discovery,"Vulnerability management, Threat detection",OT network segments,L1-L3,,Native connector,Native,Native,,,Per-device licence,,,,,,,,Content Hub solution package available
+,,,Tier2,Passive Vulnerability Management,,,,,,,,,,,,,,,,,,
+,,,Tier2,Protocol-Aware DPI,,,,,,,,,,,,,,,,,,
+,,,Tier3,Threat Intelligence Platform,,,,,,,,,,,,,,,,,,
+,,,Tier3,SOAR,,,,,,,,,,,,,,,,,,
+,,,Tier3,Machine Learning,,,,,,,,,,,,,,,,,,

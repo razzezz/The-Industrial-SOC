@@ -1,0 +1,13 @@
+// Custom table: OT_ML_Anomalies_CL
+// Fields:
+// TimeGenerated : datetime -- When the anomaly was detected
+// AnomalyType : string -- "AssetBehaviour" | "ProcessAnomaly" |
+"ProtocolAnomaly"
+// AssetIdentifier : string -- IP address or hostname of affected asset
+// AnomalyScore : real -- Model confidence score (0.0--1.0)
+// AnomalyDescription : string -- Human-readable description of the anomaly
+// BaselineReference : string -- What the expected normal behaviour was
+// ObservedBehaviour : string -- What was actually observed
+// ModelVersion : string -- Version of the model that generated the alert
+// Features : dynamic -- JSON object containing the feature values that drove the score
+With ML anomalies in Sentinel, they can be correlated with rule-based

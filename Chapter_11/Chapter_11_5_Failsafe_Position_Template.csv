@@ -1,0 +1,46 @@
+# OT Fail-Safe Position Documentation Template
+# ================================================================
+# Description: Documents fail-safe positions for crown jewel assets.
+#   Essential for the Safety Assessment phase (Phase 3) of OT
+#   incident response. Must be pre-populated by OT Engineering
+#   before an incident occurs.
+#
+# Usage: Complete one row per crown jewel asset (Tier 1 and Tier 2
+#   as minimum). OT Engineering provides technical details; SOC
+#   validates accessibility during incident response.
+#
+# Maintenance: Review quarterly or when asset configuration changes.
+#   OT Engineering owns accuracy; SOC consumes during incidents.
+#
+# Related: Chapter_11_IR_Playbook_Template.md (Phase 3)
+#          Chapter_11_5_Post_Containment_Validation.md
+# ================================================================
+
+# Schema Fields:
+# ----------------------------------------------------------------
+# AssetHostname        : string  — Asset hostname from OT_AssetRegister
+# AssetIP              : string  — Primary IP address
+# CrownJewelTier       : int     — 1 (Safety), 2 (Process Control), 3 (Visibility)
+# PurdueLevel          : string  — Purdue level (L0, L1, L2, L3)
+# DeviceType           : string  — PLC, RTU, HMI, SCADA, DCS, SIS, EWS, Historian
+# ProcessFunction      : string  — Brief description of what this device controls
+# FailSafe_NetworkLoss : string  — Behaviour if network connectivity is lost
+# FailSafe_PowerLoss   : string  — Behaviour if power is removed
+# FailSafe_Reset       : string  — Behaviour if reset to factory/last-known state
+# BackupAvailable      : string  — Yes/No — is there a redundant/backup system?
+# BackupAsset          : string  — Hostname/IP of backup system (if applicable)
+# ManualControlOption  : string  — Can process be controlled manually? Description.
+# MaxTimeWithout       : string  — Maximum time process can safely run without this asset
+# GoldenImageLocation  : string  — Path/reference to validated configuration backup
+# LastValidated        : date    — Date the fail-safe positions were last verified
+# ValidatedBy          : string  — OT Engineer who last validated
+# Notes                : string  — Additional context for incident responders
+
+# Sample CSV:
+# ================================================================
+AssetHostname,AssetIP,CrownJewelTier,PurdueLevel,DeviceType,ProcessFunction,FailSafe_NetworkLoss,FailSafe_PowerLoss,FailSafe_Reset,BackupAvailable,BackupAsset,ManualControlOption,MaxTimeWithout,GoldenImageLocation,LastValidated,ValidatedBy,Notes
+SIS-BURNER-001,10.1.1.5,1,L1,SIS,Burner Management System - Furnace A,Holds last safe state; trips to safe shutdown if watchdog expires,De-energise to trip - SAFE (fail-safe by design),Returns to safe state - all outputs de-energised,Yes,SIS-BURNER-002,Manual emergency stop buttons at furnace,0 minutes - SIS must always be operational,\\eng-backup\golden\SIS-BURNER-001_v3.2,2026-01-15,J. Smith,SIS is architecturally independent of BPCS network
+PLC-PUMP-003,10.1.2.10,2,L1,PLC,Main cooling water pump station,Holds last commanded state - CAUTION if pump was running at high speed,Pump stops - process overheating risk within 8 minutes,Reloads default program - pump starts in safe low-speed mode,Yes,PLC-PUMP-004 (standby pump),Local start/stop at MCC panel; no speed control,8 minutes before thermal limits exceeded,\\eng-backup\golden\PLC-PUMP-003_v2.1,2026-02-01,A. Johnson,Standby pump requires manual switchover at MCC
+HMI-CR-001,10.1.3.20,2,L2,HMI,Primary operator HMI - Control Room 1,Displays freeze on last values - operators lose live view,Screen blank - operators completely blind,Reboots to login screen - 3-4 minutes to restore,Yes,HMI-CR-002 (backup HMI same control room),Local gauges available for critical parameters only,15 minutes before operator intervention likely needed,\\eng-backup\golden\HMI-CR-001_image_2026Q1,2026-01-20,A. Johnson,Backup HMI covers 80% of primary HMI screens
+SCADA-SVR-001,10.1.3.30,2,L2,SCADA,Primary SCADA server - all plant polling,PLCs continue running but no supervisory control or trending,PLCs continue running; polling resumes on restart,Full reinstall required; 4-6 hours recovery,Yes,SCADA-SVR-002 (hot standby),PLCs run independently; operators use local HMIs,30 minutes acceptable; historian data gaps,\\eng-backup\golden\SCADA-SVR-001_config,2026-01-10,M. Chen,Hot standby automatic failover tested monthly
+EWS-050,10.1.3.50,3,L3,EWS,Engineering workstation - PLC programming,No impact on running process; cannot program PLCs,No impact on running process,Standard Windows reimage; 2 hours,No,,N/A - engineering access only,Indefinite - process runs without it,\\eng-backup\golden\EWS-050_SOE,2026-02-05,J. Smith,Contains licensed PLC programming software

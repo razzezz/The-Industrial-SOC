@@ -1,0 +1,42 @@
+# OT_CrownJewels Sentinel Watchlist Schema
+# ================================================================
+# Description: Crown jewel subset watchlist for dynamic severity
+#   assignment in detection rules. Contains only the highest-
+#   criticality assets (Tier 1 and Tier 2) with their impact
+#   scores and fail-safe position documentation.
+#
+# Usage: Populated from the Crown Jewel Analysis described in
+#   Chapter 6. Referenced by detection rules to escalate alert
+#   severity when crown jewel assets are involved. Maintained
+#   jointly by SOC and OT Engineering teams.
+#
+# Watchlist Name: OT_CrownJewels
+# SearchKey: IPAddress
+# ================================================================
+
+# Schema Fields:
+# ----------------------------------------------------------------
+# AssetName          : string  — Descriptive name of the crown jewel asset
+# IPAddress          : string  — Primary IP address (SearchKey)
+# Hostname           : string  — Device hostname
+# PurdueLevel        : string  — Purdue Model level
+# DeviceType         : string  — PLC, SIS, DCS, RTU, HMI, etc.
+# CrownJewelTier     : int     — 1 (Critical) or 2 (High)
+# PhysicalProcess    : string  — The physical process this asset controls
+# SafetyImpact       : int     — Safety impact score (0-10)
+# FinancialImpact    : int     — Financial impact score (0-10)
+# EnvironmentalImpact: int     — Environmental impact score (0-10)
+# RegulatoryImpact   : int     — Regulatory impact score (0-10)
+# CompositeScore     : int     — Sum of all impact scores
+# FailSafePosition   : string  — Documented fail-safe state for this asset
+# EngineeringOwner   : string  — Responsible engineering team
+# EscalationContact  : string  — Name and phone for immediate escalation
+# LastReviewDate     : date    — Date of last crown jewel review
+
+# Sample CSV for watchlist import:
+# ================================================================
+AssetName,IPAddress,Hostname,PurdueLevel,DeviceType,CrownJewelTier,PhysicalProcess,SafetyImpact,FinancialImpact,EnvironmentalImpact,RegulatoryImpact,CompositeScore,FailSafePosition,EngineeringOwner,EscalationContact,LastReviewDate
+Chlorination Dosing PLC,10.1.1.10,PLC_WaterTreat_01,L1,PLC,1,Chlorine dosing control - potable water supply,10,8,9,8,35,Dosing pump stops; chlorine injection ceases; manual dosing protocol activates,Engineering Team Alpha,J. Smith (+44 7XXX XXXXXX),2026-01-15
+Emergency Shutdown System,10.1.1.20,SIS_ESD_01,L1,SIS,1,Emergency shutdown - Boiler Unit 3,10,7,6,9,32,System defaults to safe shutdown state; boiler trips to cold state,Engineering Team Beta,A. Johnson (+44 7XXX XXXXXX),2026-01-15
+Filtration Control PLC,10.1.1.11,PLC_WaterTreat_02,L1,PLC,2,Filtration backwash and flow control,4,7,5,6,22,Filtration halts; raw water bypass valve opens (manual monitoring required),Engineering Team Alpha,J. Smith (+44 7XXX XXXXXX),2026-01-15
+Primary SCADA Server,10.1.3.20,SCADA_01,L3,SCADA,2,SCADA server - Plant A visibility and control,3,8,3,7,21,Loss of view only; PLCs continue autonomous operation on last-known setpoints,Engineering Team Alpha,J. Smith (+44 7XXX XXXXXX),2026-01-15

@@ -1,0 +1,394 @@
+// Chapter 12: EDR and SIEM Correlation Query Library
+// ================================================================
+// Description: KQL queries for Microsoft Sentinel that correlate EDR
+//   telemetry with Windows Event Logs, Sysmon data, and Zeek network
+//   logs for forensic investigation of OT incidents.
+//
+// Queries:
+//   FQ-001: Lateral Movement via RDP to OT Systems
+//   FQ-002: Credential Dumping Detection (LSASS Access)
+//   FQ-003: Persistence Mechanism Enumeration
+//   FQ-004: C2 Beaconing Detection
+//   FQ-005: Cross-Boundary Lateral Movement Timeline
+//   FQ-006: Suspicious Process to OT Network Connection Correlation
+//   FQ-007: Forensic Timeline Builder (Unified)
+//
+// Prerequisites:
+//   - Microsoft Sentinel with ASIM parsers configured
+//   - OT_AssetRegister watchlist with Purdue levels
+//   - EDR telemetry ingested (e.g., Microsoft Defender for Endpoint)
+//   - Windows Security Event Logs and Sysmon forwarded
+//   - Zeek logs forwarded via CEF/ASIM
+//
+// Chapter Reference: Chapter 12 — Digital Forensics and Lessons Learned
+// ================================================================
+
+
+// ================================================================
+// FQ-001: Lateral Movement via RDP to OT Systems
+// ================================================================
+// Correlates Windows Event ID 4624 Type 10 (RemoteInteractive/RDP)
+// with OT asset register to identify RDP sessions into OT-adjacent
+// systems. Cross-references with Zeek connection logs for network
+// confirmation.
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+let OT_Systems = _GetWatchlist('OT_AssetRegister')
+    | where PurdueLevel in ("L0", "L1", "L2", "L3", "L3.5")
+    | project TargetHostname = Hostname, TargetIP = IPAddress,
+        PurdueLevel, CrownJewelTier, DeviceType;
+// RDP logons from Windows Security Events
+let RDP_Logons = SecurityEvent
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where EventID == 4624
+    | where LogonType == 10   // RemoteInteractive (RDP)
+    | project TimeGenerated, TargetHostname = Computer,
+        TargetAccount = TargetUserName, TargetDomain = TargetDomainName,
+        SourceIP = IpAddress, LogonType,
+        LogonProcessName, AuthenticationPackageName;
+// Correlate with OT asset register
+RDP_Logons
+    | join kind=inner OT_Systems on TargetHostname
+    | project TimeGenerated, SourceIP, TargetHostname, TargetIP,
+        TargetAccount, TargetDomain, PurdueLevel, CrownJewelTier,
+        DeviceType, LogonProcessName
+    | sort by TimeGenerated asc
+    | extend AlertNote = strcat("RDP session to ", PurdueLevel,
+        " system (", CrownJewelTier, ")")
+
+
+// ================================================================
+// FQ-002: Credential Dumping Detection (LSASS Access)
+// ================================================================
+// Detects processes accessing LSASS memory, indicative of credential
+// harvesting (Mimikatz, comsvcs.dll, procdump, etc.). Combines
+// Sysmon Event ID 10 with EDR process context.
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+let KnownSafeCallers = dynamic([
+    "C:\\Windows\\System32\\lsass.exe",
+    "C:\\Windows\\System32\\svchost.exe",
+    "C:\\Windows\\System32\\wbem\\WmiPrvSE.exe",
+    "C:\\Program Files\\Windows Defender\\MsMpEng.exe"
+    // Add your EDR agent path here
+]);
+// Sysmon Event ID 10: Process Access targeting LSASS
+Event
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where Source == "Microsoft-Windows-Sysmon"
+    | where EventID == 10
+    | parse EventData with * '<Data Name="TargetImage">' TargetImage
+        '</Data>' *
+    | where TargetImage endswith "lsass.exe"
+    | parse EventData with * '<Data Name="SourceImage">' SourceImage
+        '</Data>' *
+    | parse EventData with * '<Data Name="GrantedAccess">' GrantedAccess
+        '</Data>' *
+    | parse EventData with * '<Data Name="SourceProcessId">' SourcePID
+        '</Data>' *
+    | where SourceImage !in (KnownSafeCallers)
+    // Filter for suspicious access masks (PROCESS_VM_READ = 0x0010)
+    | where GrantedAccess has_any ("0x1010", "0x1410", "0x1438",
+        "0x143a", "0x1fffff")
+    | project TimeGenerated, Computer, SourceImage, SourcePID,
+        TargetImage, GrantedAccess
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project Computer = Hostname, PurdueLevel, CrownJewelTier
+    ) on Computer
+    | extend Severity = iff(
+        isnotempty(PurdueLevel), "CRITICAL — OT System", "High")
+    | sort by TimeGenerated asc
+
+
+// ================================================================
+// FQ-003: Persistence Mechanism Enumeration
+// ================================================================
+// Identifies persistence mechanisms created during the investigation
+// window: new services, scheduled tasks, and Run key modifications.
+// Combines Windows Security Events (7045, 4698) with Sysmon (13).
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+// New services installed (Event ID 7045)
+let NewServices = Event
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where Source == "Service Control Manager" and EventID == 7045
+    | parse EventData with * '<Data Name="ServiceName">' ServiceName
+        '</Data>' *
+    | parse EventData with * '<Data Name="ImagePath">' ImagePath
+        '</Data>' *
+    | parse EventData with * '<Data Name="ServiceType">' ServiceType
+        '</Data>' *
+    | parse EventData with * '<Data Name="StartType">' StartType
+        '</Data>' *
+    | project TimeGenerated, Computer, PersistenceType = "New Service",
+        Name = ServiceName, Detail = ImagePath,
+        Extra = strcat("Type=", ServiceType, " Start=", StartType);
+// New scheduled tasks (Event ID 4698)
+let NewTasks = SecurityEvent
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where EventID == 4698
+    | project TimeGenerated, Computer,
+        PersistenceType = "Scheduled Task",
+        Name = tostring(EventData),
+        Detail = "See EventData for task XML",
+        Extra = strcat("Creator=", SubjectUserName);
+// Registry Run key modifications (Sysmon Event ID 13)
+let RunKeyMods = Event
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where Source == "Microsoft-Windows-Sysmon"
+    | where EventID == 13
+    | parse EventData with * '<Data Name="TargetObject">' TargetObject
+        '</Data>' *
+    | where TargetObject has_any (
+        "\\CurrentVersion\\Run",
+        "\\CurrentVersion\\RunOnce",
+        "\\CurrentVersion\\RunServices",
+        "\\Explorer\\Shell Folders",
+        "\\Winlogon\\Shell",
+        "\\Winlogon\\Userinit"
+    )
+    | parse EventData with * '<Data Name="Details">' RegDetails
+        '</Data>' *
+    | parse EventData with * '<Data Name="Image">' ModifyingProcess
+        '</Data>' *
+    | project TimeGenerated, Computer,
+        PersistenceType = "Registry Run Key",
+        Name = TargetObject, Detail = RegDetails,
+        Extra = strcat("ModifiedBy=", ModifyingProcess);
+// Combine all persistence mechanisms
+union NewServices, NewTasks, RunKeyMods
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project Computer = Hostname, PurdueLevel, CrownJewelTier
+    ) on Computer
+    | sort by TimeGenerated asc
+    | project TimeGenerated, Computer, PurdueLevel, CrownJewelTier,
+        PersistenceType, Name, Detail, Extra
+
+
+// ================================================================
+// FQ-004: C2 Beaconing Detection
+// ================================================================
+// Identifies periodic outbound connections indicative of C2 beaconing.
+// Analyses Zeek connection logs for consistent inter-connection
+// intervals to external destinations.
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+let InternalSubnets = dynamic([
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"
+]);
+// Analyse outbound connection patterns using ASIM NetworkSession
+_Im_NetworkSession(starttime=InvestigationStart,
+    endtime=InvestigationEnd)
+    | where not(ipv4_is_in_any_range(DstIpAddr,
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "127.0.0.0/8", "169.254.0.0/16"))
+    | where isnotempty(DstIpAddr)
+    | summarize ConnectionTimes = make_list(TimeGenerated),
+        ConnectionCount = count(),
+        TotalBytes = sum(DstBytes + SrcBytes),
+        Ports = make_set(DstPortNumber)
+        by SrcIpAddr, DstIpAddr, bin(TimeGenerated, 1h)
+    // Re-aggregate to get per-pair statistics
+    | summarize TotalConnections = sum(ConnectionCount),
+        HoursActive = dcount(TimeGenerated),
+        AvgConnectionsPerHour = avg(ConnectionCount),
+        TotalBytesTransferred = sum(TotalBytes),
+        Ports = make_set(Ports)
+        by SrcIpAddr, DstIpAddr
+    // Filter for beaconing-like patterns
+    | where TotalConnections > 20
+    | where HoursActive > 3
+    // Enrich with OT asset register
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project SrcIpAddr = IPAddress, SrcHostname = Hostname,
+            PurdueLevel, CrownJewelTier
+    ) on SrcIpAddr
+    | sort by TotalConnections desc
+    | project SrcIpAddr, SrcHostname, PurdueLevel, CrownJewelTier,
+        DstIpAddr, TotalConnections, HoursActive,
+        AvgConnectionsPerHour, TotalBytesTransferred, Ports
+
+
+// ================================================================
+// FQ-005: Cross-Boundary Lateral Movement Timeline
+// ================================================================
+// Builds a chronological timeline of authentication events that
+// cross the IT/OT boundary — any account authenticating from a
+// Purdue Level 4-5 source to a Level 0-3.5 destination.
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+let IT_Systems = _GetWatchlist('OT_AssetRegister')
+    | where PurdueLevel in ("L4", "L5")
+    | project SourceHostname = Hostname, SourceIP = IPAddress,
+        SrcPurdueLevel = PurdueLevel;
+let OT_Systems = _GetWatchlist('OT_AssetRegister')
+    | where PurdueLevel in ("L0", "L1", "L2", "L3", "L3.5")
+    | project TargetHostname = Hostname, TargetIP = IPAddress,
+        DstPurdueLevel = PurdueLevel, CrownJewelTier, DeviceType;
+SecurityEvent
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where EventID == 4624
+    | where LogonType in (3, 7, 10)   // Network, Unlock, RDP
+    | project TimeGenerated, TargetHostname = Computer,
+        Account = TargetUserName, Domain = TargetDomainName,
+        SourceIP = IpAddress, LogonType,
+        LogonTypeDesc = case(
+            LogonType == 3, "Network",
+            LogonType == 7, "Unlock",
+            LogonType == 10, "RDP",
+            tostring(LogonType))
+    // Source is IT
+    | join kind=inner IT_Systems
+        on $left.SourceIP == $right.SourceIP
+    // Destination is OT
+    | join kind=inner OT_Systems on TargetHostname
+    | project TimeGenerated, SourceIP, SourceHostname, SrcPurdueLevel,
+        TargetHostname, TargetIP, DstPurdueLevel, CrownJewelTier,
+        DeviceType, Account, Domain, LogonTypeDesc
+    | sort by TimeGenerated asc
+    | extend BoundaryCrossing = strcat(SrcPurdueLevel, " → ",
+        DstPurdueLevel)
+
+
+// ================================================================
+// FQ-006: Suspicious Process to OT Network Connection Correlation
+// ================================================================
+// Correlates EDR-identified suspicious processes on OT-adjacent
+// systems with outbound network connections to OT devices. Identifies
+// when a compromised endpoint communicates with PLCs/controllers.
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+let OT_Controllers = _GetWatchlist('OT_AssetRegister')
+    | where PurdueLevel in ("L0", "L1", "L2")
+    | where DeviceType in ("PLC", "RTU", "SIS", "DCS_Controller",
+        "SafetyController", "VFD", "IED")
+    | project ControllerIP = IPAddress, ControllerHostname = Hostname,
+        ControllerPurdueLevel = PurdueLevel,
+        ControllerCrownJewelTier = CrownJewelTier,
+        ControllerType = DeviceType;
+let ICS_Ports = dynamic([502, 20000, 44818, 2222, 4840, 47808,
+    102, 18245, 5007]);   // Modbus, DNP3, EtherNet/IP, etc.
+// Network connections from OT-adjacent systems to controllers
+_Im_NetworkSession(starttime=InvestigationStart,
+    endtime=InvestigationEnd)
+    | where DstPortNumber in (ICS_Ports)
+    | join kind=inner OT_Controllers
+        on $left.DstIpAddr == $right.ControllerIP
+    // Enrich source with asset register
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project SrcIpAddr = IPAddress, SrcHostname = Hostname,
+            SrcPurdueLevel = PurdueLevel, SrcDeviceType = DeviceType
+    ) on SrcIpAddr
+    // Flag connections from non-standard sources
+    | where SrcDeviceType !in ("SCADA_Server", "Historian",
+        "HMI", "EngWorkstation")
+        or isempty(SrcDeviceType)
+    | project TimeGenerated, SrcIpAddr, SrcHostname, SrcPurdueLevel,
+        SrcDeviceType, DstIpAddr = ControllerIP,
+        DstHostname = ControllerHostname,
+        ControllerPurdueLevel, ControllerCrownJewelTier,
+        ControllerType, DstPortNumber, NetworkProtocol
+    | sort by TimeGenerated asc
+    | extend AlertNote = strcat("Unexpected source (",
+        coalesce(SrcDeviceType, "UNKNOWN"), ") connecting to ",
+        ControllerType, " on port ", DstPortNumber)
+
+
+// ================================================================
+// FQ-007: Forensic Timeline Builder (Unified)
+// ================================================================
+// Combines authentication events, process execution (Sysmon),
+// network connections (Zeek/ASIM), and EDR alerts into a single
+// chronological timeline for the investigation window.
+// Adjust the ScopeHosts variable to the endpoints under investigation.
+// ================================================================
+let InvestigationStart = ago(7d);   // Adjust to incident timeframe
+let InvestigationEnd = now();
+let ScopeHosts = dynamic([
+    "ENG-WS-01", "HISTORIAN-01", "SCADA-SVR-01"
+    // Replace with actual hostnames under investigation
+]);
+// Authentication events
+let AuthEvents = SecurityEvent
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where Computer in (ScopeHosts) or IpAddress in (ScopeHosts)
+    | where EventID in (4624, 4625, 4648, 4672, 4720, 4732)
+    | project TimeGenerated, Host = Computer,
+        EventType = strcat("Auth-", tostring(EventID)),
+        Detail = strcat("Account=", TargetUserName,
+            " Source=", IpAddress,
+            " LogonType=", tostring(LogonType)),
+        Source = "WindowsSecurity";
+// Process creation (Sysmon Event ID 1)
+let ProcessEvents = Event
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where Source == "Microsoft-Windows-Sysmon"
+    | where EventID == 1
+    | where Computer in (ScopeHosts)
+    | parse EventData with * '<Data Name="Image">' ProcessImage
+        '</Data>' *
+    | parse EventData with * '<Data Name="CommandLine">' CmdLine
+        '</Data>' *
+    | parse EventData with * '<Data Name="ParentImage">' ParentImage
+        '</Data>' *
+    | parse EventData with * '<Data Name="User">' ProcessUser
+        '</Data>' *
+    | project TimeGenerated, Host = Computer,
+        EventType = "ProcessCreate",
+        Detail = strcat("Image=", ProcessImage,
+            " CmdLine=", CmdLine,
+            " Parent=", ParentImage,
+            " User=", ProcessUser),
+        Source = "Sysmon";
+// Network connections (ASIM)
+let NetEvents = _Im_NetworkSession(
+    starttime=InvestigationStart, endtime=InvestigationEnd)
+    | where SrcIpAddr in (ScopeHosts)
+        or DstIpAddr in (ScopeHosts)
+        or SrcHostname in (ScopeHosts)
+        or DstHostname in (ScopeHosts)
+    | project TimeGenerated,
+        Host = coalesce(SrcHostname, SrcIpAddr),
+        EventType = strcat("Network-",
+            coalesce(NetworkProtocol, "Unknown")),
+        Detail = strcat("Src=", SrcIpAddr, ":",
+            tostring(SrcPortNumber),
+            " → Dst=", DstIpAddr, ":",
+            tostring(DstPortNumber),
+            " Bytes=", tostring(DstBytes + SrcBytes)),
+        Source = "NetworkSession";
+// Service installations (Event ID 7045)
+let ServiceEvents = Event
+    | where TimeGenerated between (InvestigationStart .. InvestigationEnd)
+    | where Source == "Service Control Manager" and EventID == 7045
+    | where Computer in (ScopeHosts)
+    | parse EventData with * '<Data Name="ServiceName">' SvcName
+        '</Data>' *
+    | parse EventData with * '<Data Name="ImagePath">' SvcPath
+        '</Data>' *
+    | project TimeGenerated, Host = Computer,
+        EventType = "ServiceInstall",
+        Detail = strcat("Service=", SvcName, " Path=", SvcPath),
+        Source = "ServiceControlManager";
+// Combine into unified timeline
+union AuthEvents, ProcessEvents, NetEvents, ServiceEvents
+    | sort by TimeGenerated asc
+    | extend TimeOffset = datetime_diff('second', TimeGenerated,
+        InvestigationStart)
+    // Enrich with OT context
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project Host = Hostname, PurdueLevel, CrownJewelTier
+    ) on Host
+    | project TimeGenerated, TimeOffset, Host, PurdueLevel,
+        CrownJewelTier, EventType, Source, Detail

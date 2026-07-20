@@ -1,0 +1,44 @@
+# OT_MaintenanceWindows Sentinel Watchlist Schema
+# ================================================================
+# Description: Provides scheduling context that enables the SOC to 
+#   distinguish planned engineering activity from potential adversary 
+#   action. Used within detection rules for maintenance window 
+#   suppression — rules still fire but are annotated with maintenance 
+#   context, preserving auditability while reducing false positives.
+#
+# Usage: Maintained by OT engineering and SOC teams via change management.
+#   Consumed by detection rules (UC-ICS-001, UC-ICS-002, etc.) to 
+#   exclude authorised activity from alerting.
+#
+# Watchlist Name: OT_MaintenanceWindows
+# ================================================================
+
+# Schema Fields:
+# ----------------------------------------------------------------
+# MaintenanceID    : string  — Unique identifier (e.g., "MW-2026-0042")
+# Description      : string  — Brief description of maintenance activity
+# AffectedAssets   : string  — Comma-separated list of asset hostnames or IPs
+# PurdueLevel      : string  — Purdue levels affected (e.g., "L1,L2")
+# StartTime        : datetime — Scheduled start (UTC)
+# EndTime          : datetime — Scheduled end (UTC)
+# EngineerName     : string  — Responsible engineer
+# ChangeRequestRef : string  — Link to change management ticket
+# ExpectedProtocols: string  — Expected ICS protocols (e.g., "Modbus,S7Comm")
+# ExpectedSourceIPs: string  — IPs of engineering workstations involved
+# Status           : string  — Active, Scheduled, Completed, Cancelled
+
+# Sample CSV for watchlist import:
+# ================================================================
+MaintenanceID,Description,AffectedAssets,PurdueLevel,StartTime,EndTime,EngineerName,ChangeRequestRef,ExpectedProtocols,ExpectedSourceIPs,Status
+MW-2026-0001,Quarterly PLC firmware validation - Plant A,10.1.2.10;10.1.2.11;10.1.2.12,"L1,L2",2026-03-15T06:00:00Z,2026-03-15T18:00:00Z,J. Smith,CHG-2026-1234,"Modbus,S7Comm","10.1.3.50,10.1.3.51",Scheduled
+MW-2026-0002,HMI software update - Control Room B,10.1.3.20;10.1.3.21,L2,2026-03-20T22:00:00Z,2026-03-21T04:00:00Z,A. Johnson,CHG-2026-1235,"OPC-UA","10.1.3.50",Scheduled
+
+# Example KQL: Suppress alerts during active maintenance windows
+# ================================================================
+# let MaintenanceWindows = _GetWatchlist('OT_MaintenanceWindows')
+#     | where Status == "Active"
+#     | where StartTime <= now() and EndTime >= now()
+#     | mv-expand SrcIp = split(ExpectedSourceIPs, ",") to typeof(string)
+#     | mv-expand DstAsset = split(AffectedAssets, ",") to typeof(string)
+#     | project SrcIp = trim(" ", SrcIp), DstAsset = trim(" ", DstAsset),
+#         MaintenanceID, EngineerName;
