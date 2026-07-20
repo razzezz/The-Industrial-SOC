@@ -1,0 +1,106 @@
+// UC-ICS-013: New OT Device Detection
+// ================================================================
+// Description: Detects network sessions involving IP addresses within
+//   OT network ranges that are not present in the OT_AssetRegister
+//   watchlist. Alerts on unknown devices communicating within or across
+//   OT network boundaries, providing continuous inventory validation.
+//
+//   Unknown devices on an OT network may indicate:
+//   - Unauthorised equipment connected by personnel
+//   - Adversary-deployed implants or rogue devices
+//   - Legitimate assets missing from the inventory (register gap)
+//   - Vendor equipment connected during undocumented maintenance
+//
+//   All alerts require investigation to determine whether the device
+//   is legitimate (update register) or unauthorised (escalate).
+//
+// ATT&CK for ICS: T0887 (Wireless Sniffing), T0886 (Remote Services)
+// ICS Kill Chain: Stage 1 (Reconnaissance / Initial Access)
+// Data Source: ASIM NetworkSession + OT_AssetRegister watchlist
+//
+// Prerequisites:
+//   - OT_AssetRegister watchlist populated with known OT assets
+//   - ASIM NetworkSession parsers configured for OT network data
+//     (firewall logs, Zeek conn.log, or NDR platform)
+//   - OT_NetworkRanges defined below (adjust to your environment)
+//
+// Severity: Dynamic based on Purdue level of communication and
+//   whether the unknown device is source or destination
+// ================================================================
+
+// ---- CONFIGURATION: Adjust these to your environment ----
+// Define OT network IP ranges (CIDR notation not supported in
+// startswith, so use prefix matching)
+let OT_NetworkPrefixes = dynamic(["10.1.", "10.2.", "172.16.100.", "172.16.101."]);
+// Lookback period — run hourly, check last 2 hours for overlap
+let TimeWindow = 2h;
+// Minimum session count to reduce noise from transient connections
+let MinSessionThreshold = 3;
+// ---- END CONFIGURATION ----
+
+// Load the known asset register
+let KnownAssets = _GetWatchlist('OT_AssetRegister')
+    | project KnownIP = IPAddress;
+// Identify all IPs communicating on OT networks
+let OT_Sessions = _Im_NetworkSession(starttime=ago(TimeWindow))
+    | where isnotempty(SrcIpAddr) and isnotempty(DstIpAddr)
+    // Filter to sessions where at least one side is on an OT network
+    | where SrcIpAddr has_any (OT_NetworkPrefixes)
+        or DstIpAddr has_any (OT_NetworkPrefixes)
+    | summarize
+        SessionCount = count(),
+        FirstSeen = min(TimeGenerated),
+        LastSeen = max(TimeGenerated),
+        DistinctPartners = dcount(DstIpAddr),
+        Partners = make_set(DstIpAddr, 10),
+        Ports = make_set(DstPortNumber, 10),
+        Protocols = make_set(NetworkProtocol, 5)
+        by SrcIpAddr
+    | where SessionCount >= MinSessionThreshold;
+// Find source IPs that are on OT networks but NOT in the register
+OT_Sessions
+    | where SrcIpAddr has_any (OT_NetworkPrefixes)
+    | join kind=leftanti KnownAssets on $left.SrcIpAddr == $right.KnownIP
+    // Enrich with any context about the communication partners
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project PartnerIP = IPAddress, PartnerHostname = Hostname,
+            PartnerPurdueLevel = PurdueLevel, PartnerCrownJewelTier = CrownJewelTier,
+            PartnerDeviceType = DeviceType
+    ) on $left.SrcIpAddr == $right.PartnerIP
+    // Check if the unknown device is communicating with known OT assets
+    | extend CommunicatingWithKnownOT = isnotempty(PartnerHostname)
+    // Determine severity based on what the unknown device is talking to
+    | extend AlertSeverity = case(
+        // Unknown device talking to Tier 1/Tier 2 assets = Critical
+        Partners has_any (
+            (_GetWatchlist('OT_AssetRegister')
+            | where CrownJewelTier in ("Tier1", "Tier2")
+            | project IPAddress)
+        ), "Critical",
+        // Unknown device using ICS protocol ports = High
+        Ports has_any (dynamic([502, 20000, 44818, 102, 4840, 47808])), "High",
+        // Unknown device on OT network = Medium
+        "Medium"
+    )
+    | project
+        TimeGenerated = FirstSeen,
+        UnknownIP = SrcIpAddr,
+        FirstSeen,
+        LastSeen,
+        SessionCount,
+        DistinctPartners,
+        CommunicationPartners = Partners,
+        DestinationPorts = Ports,
+        Protocols,
+        AlertSeverity,
+        AlertTitle = strcat("New/Unknown OT Device Detected: ", SrcIpAddr),
+        AlertDescription = strcat(
+            "An IP address (", SrcIpAddr,
+            ") on the OT network was observed in ", SessionCount,
+            " network sessions but is not present in the OT_AssetRegister ",
+            "watchlist. This may indicate an unregistered legitimate device, ",
+            "unauthorised equipment, or adversary-deployed hardware. ",
+            "Investigation required to determine legitimacy."
+        )
+    | sort by AlertSeverity asc, SessionCount desc

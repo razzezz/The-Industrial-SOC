@@ -1,0 +1,224 @@
+// Chapter_09_ATTCK_ICS_Technique_Coverage.kql
+// ================================================================
+// MITRE ATT&CK for ICS — Technique-Level Coverage Tracker
+// ================================================================
+// Description: Extended coverage assessment that maps both detection
+//   rules AND hunting operations to ATT&CK for ICS at the technique
+//   level (not just tactic). Provides granular gap analysis for
+//   prioritising detection engineering and hunting investments.
+//
+// Usage: Run quarterly. Review results with SOC leadership and
+//   detection engineering team. Feed gaps into hunting hypothesis
+//   development and detection rule backlog.
+//
+// Regulatory: Supports NCSC CAF v4.0 C1 (Security Monitoring),
+//   C2.b (Threat Hunting), and NIS 2 Art. 21(2)(e) requirements
+//   for demonstrating detection and hunting coverage.
+//
+// Reference: Chapter 9 — The OT Threat Hunting Mindset
+// ================================================================
+
+// =================================================================
+// SECTION 1: Define the ATT&CK for ICS technique reference table
+// This is the authoritative list of techniques we assess against.
+// Update when MITRE releases new ATT&CK for ICS versions.
+// =================================================================
+
+let ATTCKforICS_Techniques = datatable(
+    Tactic: string, TacticID: string,
+    Technique: string, TechniqueID: string,
+    OTPriority: string
+) [
+    // Initial Access (TA0108)
+    "Initial Access", "TA0108", "Drive-by Compromise", "T0817", "Medium",
+    "Initial Access", "TA0108", "Exploit Public-Facing Application", "T0819", "High",
+    "Initial Access", "TA0108", "External Remote Services", "T0822", "Critical",
+    "Initial Access", "TA0108", "Internet Accessible Device", "T0883", "Critical",
+    "Initial Access", "TA0108", "Remote Services", "T0886", "High",
+    "Initial Access", "TA0108", "Replication Through Removable Media", "T0847", "High",
+    "Initial Access", "TA0108", "Rogue Master", "T0848", "Critical",
+    "Initial Access", "TA0108", "Spearphishing Attachment", "T0865", "Medium",
+    "Initial Access", "TA0108", "Supply Chain Compromise", "T0862", "High",
+    "Initial Access", "TA0108", "Wireless Compromise", "T0860", "Medium",
+    "Initial Access", "TA0108", "Transient Cyber Asset", "T0864", "High",
+    // Execution (TA0104)
+    "Execution", "TA0104", "Change Operating Mode", "T0858", "Critical",
+    "Execution", "TA0104", "Command-Line Interface", "T0807", "Medium",
+    "Execution", "TA0104", "Execution through API", "T0871", "Medium",
+    "Execution", "TA0104", "Modify Controller Tasking", "T0821", "Critical",
+    "Execution", "TA0104", "Native API", "T0834", "Medium",
+    "Execution", "TA0104", "Scripting", "T0853", "Medium",
+    // Persistence (TA0110)
+    "Persistence", "TA0110", "Modify Program", "T0889", "Critical",
+    "Persistence", "TA0110", "Module Firmware", "T0839", "Critical",
+    "Persistence", "TA0110", "Project File Infection", "T0873", "High",
+    "Persistence", "TA0110", "System Firmware", "T0857", "Critical",
+    "Persistence", "TA0110", "Valid Accounts", "T0859", "High",
+    // Evasion (TA0103)
+    "Evasion", "TA0103", "Change Operating Mode", "T0858", "High",
+    "Evasion", "TA0103", "Exploitation for Evasion", "T0820", "Medium",
+    "Evasion", "TA0103", "Indicator Removal on Host", "T0872", "High",
+    "Evasion", "TA0103", "Masquerading", "T0849", "Medium",
+    "Evasion", "TA0103", "Rootkit", "T0851", "High",
+    "Evasion", "TA0103", "Spoof Reporting Message", "T0856", "Critical",
+    // Discovery (TA0102)
+    "Discovery", "TA0102", "Network Connection Enumeration", "T0840", "High",
+    "Discovery", "TA0102", "Network Sniffing", "T0842", "Medium",
+    "Discovery", "TA0102", "Remote System Discovery", "T0846", "High",
+    "Discovery", "TA0102", "Remote System Information Discovery", "T0888", "Medium",
+    // Lateral Movement (TA0109)
+    "Lateral Movement", "TA0109", "Default Credentials", "T0812", "Critical",
+    "Lateral Movement", "TA0109", "Exploitation of Remote Services", "T0866", "High",
+    "Lateral Movement", "TA0109", "Lateral Tool Transfer", "T0867", "High",
+    "Lateral Movement", "TA0109", "Program Download", "T0843", "Critical",
+    "Lateral Movement", "TA0109", "Remote Services", "T0886", "High",
+    "Lateral Movement", "TA0109", "Valid Accounts", "T0859", "High",
+    // Collection (TA0100)
+    "Collection", "TA0100", "Automated Collection", "T0802", "High",
+    "Collection", "TA0100", "Data from Information Repositories", "T0811", "Medium",
+    "Collection", "TA0100", "Detect Operating Mode", "T0868", "Medium",
+    "Collection", "TA0100", "I/O Image", "T0877", "High",
+    "Collection", "TA0100", "Monitor Process State", "T0801", "Medium",
+    "Collection", "TA0100", "Point & Tag Identification", "T0861", "High",
+    "Collection", "TA0100", "Program Upload", "T0845", "Critical",
+    "Collection", "TA0100", "Screen Capture", "T0852", "Low",
+    // Command and Control (TA0101)
+    "Command and Control", "TA0101", "Commonly Used Port", "T0885", "Medium",
+    "Command and Control", "TA0101", "Connection Proxy", "T0884", "Medium",
+    "Command and Control", "TA0101", "Standard Application Layer Protocol", "T0869", "High",
+    // Inhibit Response Function (TA0107)
+    "Inhibit Response Function", "TA0107", "Activate Firmware Update Mode", "T0800", "Critical",
+    "Inhibit Response Function", "TA0107", "Alarm Suppression", "T0878", "Critical",
+    "Inhibit Response Function", "TA0107", "Block Command Message", "T0803", "Critical",
+    "Inhibit Response Function", "TA0107", "Block Reporting Message", "T0804", "Critical",
+    "Inhibit Response Function", "TA0107", "Block Serial COM", "T0805", "High",
+    "Inhibit Response Function", "TA0107", "Data Destruction", "T0809", "Critical",
+    "Inhibit Response Function", "TA0107", "Denial of Service", "T0814", "High",
+    "Inhibit Response Function", "TA0107", "Device Restart/Shutdown", "T0816", "Critical",
+    "Inhibit Response Function", "TA0107", "Manipulate I/O Image", "T0835", "Critical",
+    "Inhibit Response Function", "TA0107", "Modify Alarm Settings", "T0838", "Critical",
+    "Inhibit Response Function", "TA0107", "Service Stop", "T0881", "High",
+    "Inhibit Response Function", "TA0107", "System Firmware", "T0857", "Critical",
+    // Impair Process Control (TA0106)
+    "Impair Process Control", "TA0106", "Brute Force I/O", "T0806", "Critical",
+    "Impair Process Control", "TA0106", "Modify Parameter", "T0836", "Critical",
+    "Impair Process Control", "TA0106", "Module Firmware", "T0839", "Critical",
+    "Impair Process Control", "TA0106", "Spoof Reporting Message", "T0856", "Critical",
+    "Impair Process Control", "TA0106", "Unauthorized Command Message", "T0855", "Critical",
+    // Impact (TA0105)
+    "Impact", "TA0105", "Damage to Property", "T0879", "Critical",
+    "Impact", "TA0105", "Denial of Control", "T0813", "Critical",
+    "Impact", "TA0105", "Denial of View", "T0815", "Critical",
+    "Impact", "TA0105", "Loss of Availability", "T0826", "Critical",
+    "Impact", "TA0105", "Loss of Control", "T0827", "Critical",
+    "Impact", "TA0105", "Loss of Productivity and Revenue", "T0828", "High",
+    "Impact", "TA0105", "Loss of Protection", "T0837", "Critical",
+    "Impact", "TA0105", "Loss of Safety", "T0880", "Critical",
+    "Impact", "TA0105", "Loss of View", "T0829", "Critical",
+    "Impact", "TA0105", "Manipulation of Control", "T0831", "Critical",
+    "Impact", "TA0105", "Manipulation of View", "T0832", "Critical",
+    "Impact", "TA0105", "Theft of Operational Information", "T0882", "High",
+    // Exfiltration (TA0111) — added in ATT&CK for ICS v15+
+    "Exfiltration", "TA0111", "Exfiltration Over Alternative Protocol", "T0893", "High"
+];
+
+// =================================================================
+// SECTION 2: Map active Sentinel analytic rules to techniques
+// =================================================================
+
+let DetectionCoverage = SentinelAudit
+    | where OperationName == "Analytics rules"
+    | where Status == "Active"
+    | mv-expand Technique = parse_json(Techniques) to typeof(string)
+    | summarize DetectionRules = make_set(RuleName),
+        DetectionRuleCount = dcount(RuleName)
+        by TechniqueID = Technique;
+
+// =================================================================
+// SECTION 3: Define hunting coverage (manual — update after each hunt)
+// This section documents which techniques have been actively hunted.
+// Update TechniqueID and HuntID after completing each hunt.
+// =================================================================
+
+let HuntingCoverage = datatable(
+    TechniqueID: string, HuntID: string, LastHunted: datetime
+) [
+    // Update this table after each hunt execution
+    // Format: "TechniqueID", "Hunt-ICS-XXX", datetime(YYYY-MM-DD)
+    "T0839", "Hunt-ICS-001", datetime(2026-01-01),  // Firmware modification
+    "T0836", "Hunt-ICS-001", datetime(2026-01-01),  // Modify program
+    "T0869", "Hunt-ICS-002", datetime(2026-01-01),  // Standard app layer protocol
+    "T0802", "Hunt-ICS-002", datetime(2026-01-01),  // Automated collection
+    "T0831", "Hunt-ICS-002", datetime(2026-01-01),  // Manipulation of control
+    "T0840", "Hunt-ICS-003", datetime(2026-01-01),  // Network connection enum
+    "T0846", "Hunt-ICS-003", datetime(2026-01-01),  // Remote system discovery
+    "T0842", "Hunt-ICS-003", datetime(2026-01-01),  // Network sniffing
+];
+
+let HuntingSummary = HuntingCoverage
+    | summarize HuntIDs = make_set(HuntID),
+        HuntCount = dcount(HuntID),
+        LastHunted = max(LastHunted)
+        by TechniqueID;
+
+// =================================================================
+// SECTION 4: Combine and produce coverage assessment
+// =================================================================
+
+ATTCKforICS_Techniques
+| join kind=leftouter DetectionCoverage on TechniqueID
+| join kind=leftouter HuntingSummary on TechniqueID
+| extend DetectionRuleCount = coalesce(DetectionRuleCount, 0),
+    HuntCount = coalesce(HuntCount, 0),
+    CoverageStatus = case(
+        DetectionRuleCount > 0 and HuntCount > 0, "Full Coverage",
+        DetectionRuleCount > 0, "Detection Only",
+        HuntCount > 0, "Hunting Only",
+        "Gap"
+    ),
+    HuntStaleness = iff(isnotempty(LastHunted),
+        datetime_diff('day', now(), LastHunted),
+        int(null)
+    )
+| project Tactic, TacticID, Technique, TechniqueID, OTPriority,
+    CoverageStatus, DetectionRuleCount,
+    DetectionRules = coalesce(DetectionRules, dynamic([])),
+    HuntCount,
+    HuntIDs = coalesce(HuntIDs, dynamic([])),
+    LastHunted,
+    HuntStaleDays = HuntStaleness,
+    // Flag techniques that are high priority AND have gaps
+    ActionRequired = iff(
+        CoverageStatus == "Gap" and OTPriority in ("Critical", "High"),
+        "PRIORITY GAP", ""
+    )
+| order by TacticID asc, 
+    case(OTPriority, "Critical", 0, "High", 1, "Medium", 2, "Low", 3, 4) asc,
+    CoverageStatus desc
+
+// =================================================================
+// SECTION 5: Summary view — coverage by tactic
+// =================================================================
+
+// Uncomment the block below for a tactic-level summary view:
+//
+// ATTCKforICS_Techniques
+// | join kind=leftouter DetectionCoverage on TechniqueID
+// | join kind=leftouter HuntingSummary on TechniqueID
+// | extend DetectionRuleCount = coalesce(DetectionRuleCount, 0),
+//     HuntCount = coalesce(HuntCount, 0),
+//     HasCoverage = iff(DetectionRuleCount > 0 or HuntCount > 0, 1, 0)
+// | summarize TotalTechniques = count(),
+//     CoveredTechniques = sum(HasCoverage),
+//     DetectionOnlyCount = countif(DetectionRuleCount > 0 and HuntCount == 0),
+//     HuntingOnlyCount = countif(DetectionRuleCount == 0 and HuntCount > 0),
+//     FullCoverageCount = countif(DetectionRuleCount > 0 and HuntCount > 0),
+//     GapCount = countif(DetectionRuleCount == 0 and HuntCount == 0),
+//     CriticalGaps = countif(DetectionRuleCount == 0 and HuntCount == 0 
+//         and OTPriority == "Critical")
+//     by Tactic, TacticID
+// | extend CoveragePercent = round(100.0 * CoveredTechniques / TotalTechniques, 1)
+// | project Tactic, TacticID, TotalTechniques, CoveredTechniques,
+//     CoveragePercent, FullCoverageCount, DetectionOnlyCount,
+//     HuntingOnlyCount, GapCount, CriticalGaps
+// | order by TacticID asc

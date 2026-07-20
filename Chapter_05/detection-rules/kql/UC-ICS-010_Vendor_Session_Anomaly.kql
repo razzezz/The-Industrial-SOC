@@ -1,0 +1,75 @@
+// UC-ICS-010: Vendor Session Anomaly Detection
+// ================================================================
+// Description: Correlates vendor account authentication against the 
+//   OT_MaintenanceWindows watchlist and alerts on sessions occurring 
+//   outside approved maintenance windows or accessing assets outside 
+//   the authorised scope. Extends UC-ICS-009 for vendor-specific 
+//   monitoring as described in Chapter 5.
+//
+// ATT&CK for ICS: T0822 (External Remote Services), T0859 (Valid Accounts)
+// ICS Kill Chain: Stage 1→2 Boundary Traversal (via vendor access)
+// Data Source: ASIM Authentication + ASIM NetworkSession + OT_MaintenanceWindows
+//
+// Prerequisites:
+//   - OT_AssetRegister with vendor accounts identified (AccountType == "Vendor")
+//   - OT_MaintenanceWindows watchlist populated with scheduled vendor windows
+//   - ASIM Authentication parser configured for jump servers / VPN gateways
+//   - ASIM NetworkSession parser configured for IDMZ firewalls / Zeek
+//
+// Severity: High (vendor sessions outside maintenance are always significant)
+// ================================================================
+
+let TimeWindow = 1h;
+// Step 1: Identify vendor accounts from asset register or a dedicated vendor watchlist
+let VendorAccounts = _GetWatchlist('OT_AssetRegister')
+    | where AccountType == "Vendor"
+    | distinct AccountName;
+// Step 2: Get currently active and scheduled maintenance windows
+let ActiveMaintenance = _GetWatchlist('OT_MaintenanceWindows')
+    | where Status in ("Active", "Scheduled")
+    | where StartTime <= now() and EndTime >= now()
+    | mv-expand AffectedAsset = split(AffectedAssets, ";") to typeof(string)
+    | mv-expand ExpectedSrcIP = split(ExpectedSourceIPs, ",") to typeof(string)
+    | project MaintenanceID, Description, 
+        AffectedAsset = trim(" ", AffectedAsset),
+        ExpectedSrcIP = trim(" ", ExpectedSrcIP),
+        EngineerName, ChangeRequestRef, StartTime, EndTime;
+// Step 3: Find vendor authentications to IDMZ systems
+let VendorAuths = _Im_Authentication(starttime=ago(TimeWindow))
+    | where EventResult == "Success"
+    | where TargetUsername in (VendorAccounts) 
+        or TargetUsername has_any ("vendor", "contractor", "ext_", "v_")
+    | project AuthTime = TimeGenerated, SrcIpAddr, TargetUsername,
+        TargetDvcHostname, TargetDvcIpAddr;
+// Step 4: Correlate with subsequent OT network access
+let OT_Assets = _GetWatchlist('OT_AssetRegister')
+    | where PurdueLevel in ("L0", "L1", "L2", "L3")
+    | project OT_IP = IPAddress, OT_Hostname = Hostname,
+        PurdueLevel, CrownJewelTier, DeviceType;
+let VendorOTSessions = _Im_NetworkSession(starttime=ago(TimeWindow))
+    | join kind=inner OT_Assets on $left.DstIpAddr == $right.OT_IP
+    | project SessionTime = TimeGenerated, SrcIpAddr, DstIpAddr = OT_IP,
+        OT_Hostname, PurdueLevel, CrownJewelTier, DeviceType,
+        DstPortNumber, NetworkProtocol;
+// Step 5: Join vendor auth with OT sessions
+let VendorActivity = VendorAuths
+    | join kind=inner VendorOTSessions on SrcIpAddr
+    | where SessionTime >= AuthTime
+    | where datetime_diff('minute', SessionTime, AuthTime) <= 120
+    | project AuthTime, SessionTime, SrcIpAddr, TargetUsername,
+        TargetDvcHostname, OT_Hostname, DstIpAddr, PurdueLevel,
+        CrownJewelTier, DeviceType, DstPortNumber, NetworkProtocol;
+// Step 6: Check if vendor activity falls within an active maintenance window
+VendorActivity
+    | join kind=leftanti ActiveMaintenance 
+        on $left.DstIpAddr == $right.AffectedAsset
+    // leftanti returns rows with NO matching maintenance window
+    | extend AlertType = "VendorSessionOutsideMaintenance",
+        AlertDetail = strcat("Vendor account '", TargetUsername, 
+            "' accessed OT asset '", OT_Hostname, 
+            "' (", PurdueLevel, ") with no active maintenance window"),
+        AlertSeverity = case(
+            CrownJewelTier == "Tier1", "Critical",
+            CrownJewelTier == "Tier2", "High",
+            PurdueLevel in ("L0", "L1"), "High",
+            "Medium")

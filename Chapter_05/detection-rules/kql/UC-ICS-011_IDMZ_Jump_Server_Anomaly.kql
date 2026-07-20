@@ -1,0 +1,111 @@
+// UC-ICS-011: IDMZ Jump Server Anomaly Detection
+// ================================================================
+// Description: Baselines jump server authentication patterns and alerts 
+//   on anomalous access: unusual source IPs, off-hours authentication,
+//   excessive session counts, or accounts not associated with active 
+//   maintenance windows. Provides early warning of compromised remote 
+//   access infrastructure — a critical IDMZ detection as described 
+//   in Chapter 5.
+//
+// ATT&CK for ICS: T0822 (External Remote Services), T0859 (Valid Accounts)
+// ATT&CK Enterprise: T1021.001 (Remote Desktop Protocol), T1078 (Valid Accounts)
+// ICS Kill Chain: Stage 1→2 Boundary Traversal
+// Data Source: ASIM Authentication (Windows Security Events on Jump Servers)
+//
+// Prerequisites:
+//   - OT_AssetRegister with jump servers at L3.5 (DeviceType == "JumpHost")
+//   - Windows Security Event Logs forwarded from jump servers
+//   - ASIM Authentication parser configured
+//   - Historical baseline period: minimum 30 days recommended
+//
+// Severity: Dynamic based on anomaly type and destination
+// ================================================================
+
+// --- Part A: Off-Hours Authentication ---
+// Detects logons to jump servers outside business hours (configurable)
+let BusinessHourStart = 7;  // 07:00 local time
+let BusinessHourEnd = 19;   // 19:00 local time
+let TimeWindow = 1h;
+let JumpServers = _GetWatchlist('OT_AssetRegister')
+    | where PurdueLevel == "L3.5"
+    | where DeviceType in ("JumpHost", "RemoteAccessGW", "BastionHost")
+    | project JumpServerIP = IPAddress, JumpServerHostname = Hostname;
+let ActiveMaintenance = _GetWatchlist('OT_MaintenanceWindows')
+    | where Status in ("Active", "Scheduled")
+    | where StartTime <= now() and EndTime >= now()
+    | mv-expand ExpectedSrcIP = split(ExpectedSourceIPs, ",") to typeof(string)
+    | project MaintenanceID, ExpectedSrcIP = trim(" ", ExpectedSrcIP),
+        EngineerName;
+_Im_Authentication(starttime=ago(TimeWindow))
+    | where EventResult == "Success"
+    | join kind=inner JumpServers 
+        on $left.TargetDvcHostname == $right.JumpServerHostname
+    // Check if outside business hours
+    | where hourofday(TimeGenerated) < BusinessHourStart 
+        or hourofday(TimeGenerated) >= BusinessHourEnd
+        or dayofweek(TimeGenerated) in (0d, 6d) // Weekend
+    // Exclude if source IP matches an active maintenance window
+    | join kind=leftanti ActiveMaintenance 
+        on $left.SrcIpAddr == $right.ExpectedSrcIP
+    | project TimeGenerated, SrcIpAddr, TargetUsername,
+        JumpServerHostname, EventType, LogonType
+    | extend AlertType = "JumpServerOffHoursLogon",
+        AlertSeverity = "High",
+        AlertDetail = strcat("Off-hours logon to jump server '", 
+            JumpServerHostname, "' by '", TargetUsername, 
+            "' from ", SrcIpAddr, " with no active maintenance window")
+
+// --- Part B: Excessive Session Count ---
+// Detects when a single source IP or account creates an unusual number 
+// of sessions to jump servers, potentially indicating automated access 
+// or credential spraying
+// 
+// Run as a separate analytic rule:
+//
+// let SessionThreshold = 10;
+// let TimeWindow = 1h;
+// let JumpServers = _GetWatchlist('OT_AssetRegister')
+//     | where PurdueLevel == "L3.5"
+//     | where DeviceType in ("JumpHost", "RemoteAccessGW", "BastionHost")
+//     | project JumpServerHostname = Hostname;
+// _Im_Authentication(starttime=ago(TimeWindow))
+//     | where EventResult == "Success"
+//     | join kind=inner JumpServers 
+//         on $left.TargetDvcHostname == $right.JumpServerHostname
+//     | summarize SessionCount = count(),
+//         JumpServers = make_set(TargetDvcHostname),
+//         Accounts = make_set(TargetUsername),
+//         FirstSeen = min(TimeGenerated),
+//         LastSeen = max(TimeGenerated)
+//         by SrcIpAddr
+//     | where SessionCount > SessionThreshold
+//     | extend AlertType = "JumpServerExcessiveSessions",
+//         AlertSeverity = "High",
+//         AlertDetail = strcat("Source ", SrcIpAddr, " created ",
+//             SessionCount, " sessions across ", 
+//             array_length(JumpServers), " jump servers in 1 hour")
+
+// --- Part C: Unknown Source IP ---
+// Detects logons from source IPs not in the known baseline.
+// Requires a watchlist of known/approved source IP ranges.
+// 
+// Run as a separate analytic rule:
+//
+// let KnownSourceRanges = _GetWatchlist('OT_AssetRegister')
+//     | where DeviceType == "ApprovedRemoteSource"
+//     | distinct IPAddress;
+// let JumpServers = _GetWatchlist('OT_AssetRegister')
+//     | where PurdueLevel == "L3.5"
+//     | where DeviceType in ("JumpHost", "RemoteAccessGW", "BastionHost")
+//     | project JumpServerHostname = Hostname;
+// _Im_Authentication(starttime=ago(1h))
+//     | where EventResult == "Success"
+//     | join kind=inner JumpServers 
+//         on $left.TargetDvcHostname == $right.JumpServerHostname
+//     | where SrcIpAddr !in (KnownSourceRanges)
+//     | project TimeGenerated, SrcIpAddr, TargetUsername,
+//         TargetDvcHostname, EventType, LogonType
+//     | extend AlertType = "JumpServerUnknownSource",
+//         AlertSeverity = "High",
+//         AlertDetail = strcat("Unknown source IP ", SrcIpAddr, 
+//             " authenticated to jump server '", TargetDvcHostname, "'")

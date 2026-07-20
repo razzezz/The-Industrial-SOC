@@ -1,0 +1,66 @@
+// Hunt-ICS-001: Unauthorised Firmware Operations
+// ================================================================
+// Hypothesis: Adversary has uploaded modified firmware to PLCs
+// ATT&CK for ICS: T0839 (Module Firmware), T0836 (Modify Program)
+// Kill Chain: Stage 2 -- Persistence / Impair Process Control
+// Data Source: Zeek Modbus logs, OT_MaintenanceWindows, OT_AssetRegister
+// ================================================================
+let LookbackPeriod = 30d; // Hunting looks back further than real-time detection
+// Step 1: Identify all firmware-related Modbus operations
+let FirmwareOps = Zeek_modbus_CL
+| where TimeGenerated > ago(LookbackPeriod)
+| where func_code_d == 43 // Read/Write Device Identification
+or func_code_d == 23 // Read/Write Multiple Registers (bulk transfer)
+or func_code_d in (100 .. 127) // Vendor-specific function codes (firmware common)
+| project TimeGenerated,
+SrcIpAddr = id_orig_h,
+DstIpAddr = id_resp_h,
+FuncCode = func_code_d,
+uid_s;
+// Step 2: Enrich with asset context
+let EnrichedOps = FirmwareOps
+| join kind=leftouter (
+_GetWatchlist('OT_AssetRegister')
+| project DstIpAddr = IPAddress, DstHostname = Hostname,
+DstDeviceType = DeviceType, DstPurdueLevel = PurdueLevel,
+DstCrownJewelTier = CrownJewelTier
+) on DstIpAddr
+| join kind=leftouter (
+_GetWatchlist('OT_AssetRegister')
+| project SrcIpAddr = IPAddress, SrcHostname = Hostname,
+SrcDeviceType = DeviceType
+) on SrcIpAddr;
+// Step 3: Exclude operations during active maintenance windows
+let ActiveMaintenance = _GetWatchlist('OT_MaintenanceWindows')
+| where Status in ("Active", "Scheduled")
+| mv-expand AffectedAsset = split(AffectedAssets, ";") to typeof(string)
+| mv-expand SrcIp = split(ExpectedSourceIPs, ",") to typeof(string)
+| project MaintenanceID,
+SrcIp = trim(" ", SrcIp),
+AffectedAsset = trim(" ", AffectedAsset),
+StartTime, EndTime, EngineerName, ChangeRequestRef;
+EnrichedOps
+| join kind=leftanti (
+ActiveMaintenance
+| project SrcIpAddr = SrcIp, DstIpAddr = AffectedAsset, StartTime, EndTime
+) on SrcIpAddr, DstIpAddr
+| summarize FirmwareOpCount = count(),
+FuncCodesUsed = make_set(FuncCode),
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated),
+UniqueTargets = dcount(DstIpAddr),
+Targets = make_set(DstIpAddr)
+by SrcIpAddr, SrcHostname, SrcDeviceType
+| where FirmwareOpCount > 0
+| extend HuntID = "Hunt-ICS-001",
+Hypothesis = "Unauthorised firmware modification",
+Severity = case(
+UniqueTargets > 3, "Critical", // Multiple PLCs targeted
+FirmwareOpCount > 10, "High", // Repeated operations
+"Medium"
+)
+| project HuntID, Severity, FirstSeen, LastSeen,
+SrcIpAddr, SrcHostname, SrcDeviceType,
+UniqueTargets, Targets, FirmwareOpCount, FuncCodesUsed,
+Hypothesis
+| order by Severity desc, FirmwareOpCount desc

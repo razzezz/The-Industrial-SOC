@@ -1,0 +1,16 @@
+// Discover OT-network assets authenticating to Active Directory
+// Adjust IP ranges to match your OT network addressing
+_Im_Authentication
+| where TimeGenerated > ago(30d)
+| where EventResult == "Success"
+| where SrcIpAddr startswith "10.1." or SrcIpAddr startswith
+"10.2."
+// Replace with your OT IP ranges
+| summarize
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated),
+AuthCount = count(),
+DistinctUsers = dcount(TargetUsername),
+Users = make_set(TargetUsername, 10)
+by SrcIpAddr, TargetDvcHostname
+| sort by AuthCount desc

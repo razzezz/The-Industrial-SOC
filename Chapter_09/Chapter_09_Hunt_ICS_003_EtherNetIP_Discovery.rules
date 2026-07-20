@@ -1,0 +1,22 @@
+# Hunt-ICS-003-Suricata: EtherNet/IP ListIdentity Discovery
+# ATT&CK for ICS: T0846 (Remote System Discovery)
+# Detects EtherNet/IP ListIdentity commands used to enumerate
+# Rockwell/Allen-Bradley devices on the OT network.
+# Expected only from known engineering workstations during maintenance.
+
+alert tcp any any -> any 44818 (msg:"ICS HUNT - EtherNet/IP ListIdentity Request (Device Enumeration)"; \
+    flow:established,to_server; \
+    content:"|00 04|"; offset:0; depth:2; \
+    classtype:network-scan; \
+    sid:1600001; rev:1; \
+    metadata:mitre_technique T0846, \
+    purdue_level L1-L2, severity medium, \
+    hunt_id Hunt-ICS-003;)
+
+alert udp any any -> any 44818 (msg:"ICS HUNT - EtherNet/IP ListIdentity Broadcast (Network Discovery)"; \
+    content:"|00 04|"; offset:0; depth:2; \
+    classtype:network-scan; \
+    sid:1600002; rev:1; \
+    metadata:mitre_technique T0846, \
+    purdue_level L1-L2, severity high, \
+    hunt_id Hunt-ICS-003;)

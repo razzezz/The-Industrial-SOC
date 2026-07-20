@@ -1,0 +1,25 @@
+// Build communication baseline for OT assets
+// Run over 30 days to capture normal operational patterns
+// including shift changes, weekend variations, and batch cycles
+let BaselinePeriod = 30d;
+_Im_NetworkSession(starttime=ago(BaselinePeriod))
+| join kind=inner (
+_GetWatchlist('OT_AssetRegister')
+| project DstIpAddr = IPAddress, DstHostname = Hostname,
+DstPurdueLevel = PurdueLevel, DstDeviceType = DeviceType
+) on DstIpAddr
+| summarize
+SessionCount = count(),
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated),
+AvgDailySessionCount = count() / 30,
+DistinctDays = dcount(bin(TimeGenerated, 1d)),
+Protocols = make_set(NetworkProtocol, 10),
+AppProtocols = make_set(DstAppName, 10),
+DstPorts = make_set(DstPortNumber, 10),
+AvgBytesPerSession = avg(NetworkBytes)
+by SrcIpAddr, DstIpAddr, DstHostname, DstPurdueLevel, DstDeviceType
+| extend CommunicationStability = iff(DistinctDays >= 25,
+"Stable",
+iff(DistinctDays >= 15, "Regular", "Intermittent"))
+| sort by DstPurdueLevel asc, SessionCount desc

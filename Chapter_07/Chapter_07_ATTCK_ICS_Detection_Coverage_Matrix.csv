@@ -1,0 +1,57 @@
+# Chapter 7: MITRE ATT&CK for ICS Detection Coverage Matrix
+# ================================================================
+# Description: Maps ATT&CK for ICS tactics and techniques to required
+#   data sources, available detection rules, and current coverage status.
+#   Use this matrix to identify gaps in detection capability and
+#   prioritise telemetry deployment and detection rule development.
+#
+# Usage: Complete one row per ATT&CK for ICS technique relevant to
+#   your environment. Update quarterly and after every new detection
+#   rule deployment. Cross-reference with the threat landscape
+#   assessment from Chapter 3 to prioritise based on threat relevance.
+#
+# Coverage Status Values:
+#   Covered     — Detection rule deployed and validated
+#   Partial     — Detection rule exists but missing data source(s)
+#   Planned     — Detection rule in development
+#   Gap         — No detection capability; data source may be missing
+#   N/A         — Technique not applicable to this environment
+#
+# Threat Relevance Values:
+#   Critical    — Used by threat actors targeting our sector
+#   High        — Used by ICS-targeting threat actors generally
+#   Medium      — Documented technique with limited observed use
+#   Low         — Theoretical or rarely observed
+# ================================================================
+
+ATT&CK_Tactic,ATT&CK_TacticID,ATT&CK_Technique,ATT&CK_TechniqueID,RequiredDataSources,DetectionRuleIDs,DetectionLayer,CoverageStatus,ThreatRelevance,ThreatActors,Notes
+Initial Access,TA0108,External Remote Services,T0822,Firewall logs; VPN logs; Authentication logs,UC-ICS-001; UC-ICS-003,Sentinel KQL,Covered,Critical,"Volt Typhoon, Seashell Blizzard, Storm-0784",Monitor IDMZ firewall and VPN gateway logs
+Initial Access,TA0108,Internet Accessible Device,T0883,Asset register; External scan data,—,—,Gap,Critical,"Storm-0784, CARR",Requires external attack surface monitoring
+Initial Access,TA0108,Supply Chain Compromise,T0862,EDR; File integrity; Vendor access logs,—,—,Gap,High,CHERNOVITE,Requires vendor access monitoring and FIM
+Initial Access,TA0108,Drive-by Compromise,T0817,Proxy logs; EDR; DNS logs,—,—,Partial,Medium,,EDR on workstations detects post-exploitation
+Initial Access,TA0108,Spearphishing Attachment,T0865,Email gateway; EDR,—,—,Partial,High,"Seashell Blizzard",EDR on workstations detects payload execution
+Execution,TA0104,Command-Line Interface,T0807,Sysmon; EDR; PowerShell logs,—,Sentinel KQL,Partial,Critical,Volt Typhoon,Requires Sysmon/EDR on OT workstations
+Execution,TA0104,Scripting,T0853,Sysmon; EDR; PowerShell logs,—,—,Partial,High,Volt Typhoon,PowerShell logging essential for LOTL detection
+Execution,TA0104,Change Program State,T0875,Zeek ICS protocol logs; Suricata,UC-ICS-002; UC-ICS-007,Multi-layer,Covered,Critical,"CHERNOVITE, Seashell Blizzard",Write commands and programme operations detected
+Persistence,TA0110,Modify Program,T0889,Zeek ICS protocol logs; EDR,UC-ICS-005; UC-ICS-006; UC-ICS-007,Suricata,Covered,Critical,"CHERNOVITE, Seashell Blizzard",Suricata rules detect programme modification operations
+Persistence,TA0110,Valid Accounts,T0859,Authentication logs; EDR,UC-ICS-004; UC-ICS-010,Sentinel KQL,Covered,Critical,"Volt Typhoon, Storm-0784",Brute force and anomalous auth detected
+Discovery,TA0102,Network Sniffing,T0842,EDR; Network monitoring,—,—,Partial,High,Volt Typhoon,EDR detects sniffing tools on workstations
+Discovery,TA0102,Remote System Discovery,T0846,Sysmon; EDR; Zeek,UC-ICS-008,Zeek-KQL,Covered,High,"Volt Typhoon, CHERNOVITE",Modbus function code scan detection
+Discovery,TA0102,Remote System Information Discovery,T0888,Zeek ICS protocol logs,UC-ICS-005,Suricata,Partial,High,,Modbus diagnostic FC8 detected by Suricata
+Lateral Movement,TA0109,Remote Services,T0886,Firewall logs; Authentication logs; EDR,UC-ICS-001; UC-ICS-003; UC-ICS-009,Sentinel KQL,Covered,Critical,"Volt Typhoon, Seashell Blizzard",Cross-domain lateral movement correlation
+Lateral Movement,TA0109,Default Credentials,T0812,Authentication logs,UC-ICS-004,Sentinel KQL,Partial,High,Storm-0784,Brute force detected; default credential use harder to detect
+Lateral Movement,TA0109,Valid Accounts,T0859,Authentication logs; EDR,UC-ICS-004; UC-ICS-009; UC-ICS-010,Sentinel KQL,Covered,Critical,Volt Typhoon,Multiple detection rules address credential abuse
+Collection,TA0100,Automated Collection,T0802,Zeek ICS protocol logs; Network monitoring,UC-ICS-001,Sentinel KQL,Partial,High,,Unusual read patterns from new sources detected
+Collection,TA0100,Monitor Process State,T0801,Zeek ICS protocol logs,—,—,Gap,Medium,,Requires baseline of normal read patterns per asset
+Command and Control,TA0111,Commonly Used Port,T0885,Firewall logs; Zeek; DNS logs,—,—,Partial,High,Volt Typhoon,Firewall logs detect outbound connections
+Command and Control,TA0111,Standard Application Layer Protocol,T0869,Zeek; Proxy logs; DNS logs,—,—,Partial,High,Volt Typhoon,DNS and proxy monitoring detects C2 patterns
+Impair Process Control,TA0106,Unauthorised Command Message,T0855,Zeek ICS protocol logs; Suricata,UC-ICS-002; UC-ICS-006,Multi-layer,Covered,Critical,"CHERNOVITE, Seashell Blizzard",Write commands outside maintenance detected
+Impair Process Control,TA0106,Modify Parameter,T0836,Zeek ICS protocol logs,UC-ICS-002,Sentinel KQL,Partial,Critical,CHERNOVITE,Setpoint writes detected; register-level validation is Gap
+Impair Process Control,TA0106,Module Firmware,T0839,Zeek ICS protocol logs; Suricata,UC-ICS-007,Suricata,Partial,Critical,CHERNOVITE,CIP programme operations detected; not all firmware protocols covered
+Inhibit Response Function,TA0107,Block Reporting Message,T0804,Zeek; Network monitoring,—,—,Gap,High,Seashell Blizzard,Requires baseline of expected reporting intervals
+Inhibit Response Function,TA0107,Device Restart/Shutdown,T0816,Suricata; Zeek ICS protocol logs,UC-ICS-005; UC-ICS-006,Suricata,Covered,High,Seashell Blizzard,Modbus restart and DNP3 cold restart detected
+Inhibit Response Function,TA0107,Manipulate I/O Image,T0835,Zeek ICS protocol logs,—,—,Gap,Critical,CHERNOVITE,Deep protocol analysis required — research area
+Impact,TA0105,Damage to Property,T0879,Process telemetry; Safety system monitoring,—,—,Gap,Critical,"CHERNOVITE, Seashell Blizzard",Requires process telemetry correlation
+Impact,TA0105,Loss of Control,T0827,Zeek; Process telemetry,—,—,Gap,Critical,Seashell Blizzard,Requires process telemetry and SIS monitoring
+Impact,TA0105,Loss of View,T0829,Network monitoring; HMI monitoring,—,—,Partial,High,Seashell Blizzard,HMI disconnection detectable via network baseline
+Impact,TA0105,Loss of Safety,T0880,Safety system monitoring,—,—,Gap,Critical,CHERNOVITE,Safety zone monitoring is Priority 4 in deployment plan

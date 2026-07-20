@@ -1,0 +1,15 @@
+// Discover OT assets from firewall connection logs
+// Identify unique source/destination pairs crossing the IDMZ
+_Im_NetworkSession
+| where TimeGenerated > ago(30d)
+| where SrcIpAddr startswith "10.1." or DstIpAddr startswith
+"10.1."
+| summarize
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated),
+SessionCount = count(),
+DistinctPorts = dcount(DstPortNumber),
+Ports = make_set(DstPortNumber, 10),
+Protocols = make_set(NetworkProtocol, 5)
+by SrcIpAddr, DstIpAddr
+| sort by SessionCount desc

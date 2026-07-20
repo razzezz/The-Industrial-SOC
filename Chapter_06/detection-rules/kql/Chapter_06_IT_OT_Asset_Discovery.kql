@@ -1,0 +1,230 @@
+// Chapter_06_IT_OT_Asset_Discovery.kql
+// ================================================================
+// Description: Collection of KQL queries for discovering OT-connected
+//   assets using existing IT infrastructure data in Microsoft Sentinel.
+//   These queries mine Active Directory authentication logs, DHCP
+//   records, and network session data to identify assets on OT networks
+//   without deploying any new tools or agents.
+//
+// Usage: Run each query against your Sentinel workspace, adjusting the
+//   OT network IP ranges to match your environment. Cross-reference
+//   results with OT engineering interviews to build the initial asset
+//   register.
+//
+// Prerequisites:
+//   - ASIM Authentication and NetworkSession parsers configured
+//   - Relevant log sources ingested (AD Security Events, DHCP, firewall)
+//   - Knowledge of your OT network IP ranges
+// ================================================================
+
+
+// ================================================================
+// QUERY 1: Active Directory — OT Network Authentications
+// ================================================================
+// Purpose: Identify Windows-based systems on OT networks that
+//   authenticate to Active Directory. Discovers engineering workstations,
+//   domain-joined HMIs, SCADA servers, and historians.
+//
+// Adjust IP ranges: Replace "10.1." and "10.2." with your OT subnets
+// ================================================================
+
+_Im_Authentication
+| where TimeGenerated > ago(30d)
+| where EventResult == "Success"
+| where SrcIpAddr startswith "10.1." or SrcIpAddr startswith "10.2."
+    // Replace with your OT IP ranges
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    AuthCount = count(),
+    DistinctUsers = dcount(TargetUsername),
+    Users = make_set(TargetUsername, 10),
+    LogonTypes = make_set(EventSubType, 5)
+    by SrcIpAddr, TargetDvcHostname
+| extend DaysSinceLastSeen = datetime_diff('day', now(), LastSeen)
+| sort by AuthCount desc
+
+
+// ================================================================
+// QUERY 2: Active Directory — Failed Authentication from OT Networks
+// ================================================================
+// Purpose: Identify OT-network devices generating failed logins.
+//   May indicate credential issues, misconfigured services, or
+//   brute force activity. Also reveals devices attempting to
+//   authenticate that may not be in the asset register.
+// ================================================================
+
+_Im_Authentication
+| where TimeGenerated > ago(30d)
+| where EventResult == "Failure"
+| where SrcIpAddr startswith "10.1." or SrcIpAddr startswith "10.2."
+| summarize
+    FailureCount = count(),
+    FirstFailure = min(TimeGenerated),
+    LastFailure = max(TimeGenerated),
+    DistinctUsers = dcount(TargetUsername),
+    AttemptedUsers = make_set(TargetUsername, 10),
+    FailureReasons = make_set(EventResultDetails, 5)
+    by SrcIpAddr, TargetDvcHostname
+| where FailureCount >= 5
+| sort by FailureCount desc
+
+
+// ================================================================
+// QUERY 3: DHCP — Devices Obtaining Leases on OT Networks
+// ================================================================
+// Purpose: Discover devices requesting DHCP leases on OT network
+//   segments. While many OT devices use static IPs, DHCP logs can
+//   reveal workstations, temporary engineering laptops, and devices
+//   that were configured for dynamic addressing.
+//
+// Note: Requires DHCP server logs ingested via Syslog or Windows
+//   Event Forwarding. Adjust the parse statement to match your
+//   DHCP log format.
+// ================================================================
+
+// Option A: Linux ISC DHCP via Syslog
+Syslog
+| where TimeGenerated > ago(30d)
+| where ProcessName == "dhcpd" or Facility == "daemon"
+| where SyslogMessage has "DHCPACK"
+| parse SyslogMessage with * "DHCPACK on " IPAddress " to " MACAddress
+    " (" Hostname ")" *
+| where IPAddress startswith "10.1." or IPAddress startswith "10.2."
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    LeaseCount = count()
+    by IPAddress, MACAddress, Hostname
+| sort by LastSeen desc
+
+// Option B: Windows DHCP via Event Log
+// Event
+// | where Source == "Microsoft-Windows-Dhcp-Server"
+// | where EventID == 10  // New lease
+// | parse RenderedDescription with * "IP Address: " IPAddress
+//     " Host Name: " Hostname " MAC Address: " MACAddress *
+// | where IPAddress startswith "10.1." or IPAddress startswith "10.2."
+// | summarize
+//     FirstSeen = min(TimeGenerated),
+//     LastSeen = max(TimeGenerated),
+//     LeaseCount = count()
+//     by IPAddress, MACAddress, Hostname
+// | sort by LastSeen desc
+
+
+// ================================================================
+// QUERY 4: Network Sessions — OT Asset Communication Mapping
+// ================================================================
+// Purpose: Identify all unique communication pairs involving OT
+//   network addresses. Reveals which devices talk to which, on which
+//   ports and protocols. Essential for building the Communication
+//   Profile field in the OT Asset Register.
+// ================================================================
+
+_Im_NetworkSession
+| where TimeGenerated > ago(30d)
+| where SrcIpAddr startswith "10.1." or DstIpAddr startswith "10.1."
+    or SrcIpAddr startswith "10.2." or DstIpAddr startswith "10.2."
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    SessionCount = count(),
+    TotalBytes = sum(SrcBytes + DstBytes),
+    DistinctPorts = dcount(DstPortNumber),
+    Ports = make_set(DstPortNumber, 15),
+    Protocols = make_set(NetworkProtocol, 5)
+    by SrcIpAddr, DstIpAddr
+| extend ICS_Ports = Ports has_any (dynamic([
+    502,    // Modbus TCP
+    20000,  // DNP3
+    44818,  // EtherNet/IP
+    102,    // S7Comm
+    4840,   // OPC-UA
+    47808,  // BACnet
+    2222,   // EtherNet/IP (implicit)
+    18245,  // GE SRTP
+    1089,   // FF HSE
+    1090,   // FF HSE
+    1091    // FF HSE
+]))
+| sort by ICS_Ports desc, SessionCount desc
+
+
+// ================================================================
+// QUERY 5: Firewall — Cross-Boundary Traffic Analysis
+// ================================================================
+// Purpose: Identify all traffic crossing the IT/OT boundary via
+//   firewall logs. Reveals which IT systems connect to which OT
+//   systems, helping identify both known and unknown IT-to-OT
+//   communication paths.
+// ================================================================
+
+_Im_NetworkSession
+| where TimeGenerated > ago(30d)
+// IT-to-OT direction: source is IT range, destination is OT range
+| where (SrcIpAddr startswith "192.168." or SrcIpAddr startswith "10.0.")
+    and (DstIpAddr startswith "10.1." or DstIpAddr startswith "10.2.")
+| summarize
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    SessionCount = count(),
+    DistinctSrcPorts = dcount(SrcPortNumber),
+    DstPorts = make_set(DstPortNumber, 10),
+    Protocols = make_set(NetworkProtocol, 5)
+    by SrcIpAddr, DstIpAddr
+// Enrich with OT asset register if available
+| join kind=leftouter (
+    _GetWatchlist('OT_AssetRegister')
+    | project OT_IP = IPAddress, OT_Hostname = Hostname,
+        PurdueLevel, CrownJewelTier, DeviceType
+) on $left.DstIpAddr == $right.OT_IP
+| extend AssetKnown = isnotempty(OT_Hostname)
+| sort by AssetKnown asc, SessionCount desc
+
+
+// ================================================================
+// QUERY 6: MAC OUI — Manufacturer Identification
+// ================================================================
+// Purpose: Extract manufacturer information from MAC addresses
+//   observed in DHCP or ARP logs. The first 3 octets (OUI) of a
+//   MAC address identify the manufacturer. Common ICS OUIs are
+//   matched to vendor names for quick identification.
+//
+// Note: This query provides a starting reference. Extend the OUI
+//   list based on the manufacturers in your environment.
+// ================================================================
+
+let ICS_OUI_Lookup = datatable(OUI:string, Manufacturer:string) [
+    "00:80:F4", "Siemens",
+    "00:0E:8C", "Siemens",
+    "08:00:06", "Siemens",
+    "00:00:BC", "Allen-Bradley (Rockwell)",
+    "00:1D:9C", "Rockwell Automation",
+    "00:A0:70", "Rockwell Automation",
+    "00:80:F0", "Schneider Electric",
+    "00:00:54", "Schneider Electric (Modicon)",
+    "00:60:35", "ABB",
+    "00:C0:C6", "ABB/Pepperl+Fuchs",
+    "00:01:9E", "GE Intelligent Platforms",
+    "00:30:11", "Honeywell",
+    "00:01:4A", "Honeywell (Experion)",
+    "00:50:C2", "Emerson (DeltaV)",
+    "00:30:D6", "Yokogawa",
+    "00:07:7C", "Westermo",
+    "00:20:4A", "Prosoft Technology",
+    "00:0A:E4", "Phoenix Contact",
+    "B8:A4:4F", "Moxa",
+    "00:90:E8", "Moxa"
+];
+// Apply against DHCP-discovered devices
+Syslog
+| where TimeGenerated > ago(30d)
+| where SyslogMessage has "DHCPACK"
+| parse SyslogMessage with * "DHCPACK on " IPAddress " to " MACAddress
+    " (" Hostname ")" *
+| where IPAddress startswith "10.1." or IPAddress startswith "10.2."
+| extend OUI = toupper(substring(MACAddress, 0, 8))
+| join kind=leftouter ICS_OUI_Lookup on OUI
+| project IPAddress, MACAddress, Hostname, OUI, Manufacturer
+| sort by Manufacturer asc

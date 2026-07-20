@@ -1,0 +1,14 @@
+// Discover devices obtaining DHCP leases on OT networks
+// Requires DHCP server logs ingested into Sentinel
+Syslog
+| where ProcessName == "dhcpd" or Facility == "daemon"
+| where SyslogMessage has "DHCPACK"
+| parse SyslogMessage with * "DHCPACK on " IPAddress " to " MACAddress " (" Hostname ")" *
+| where IPAddress startswith "10.1." or IPAddress startswith
+"10.2."
+| summarize
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated),
+LeaseCount = count()
+by IPAddress, MACAddress, Hostname
+| sort by LastSeen desc

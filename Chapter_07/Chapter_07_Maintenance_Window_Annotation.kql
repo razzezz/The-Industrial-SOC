@@ -1,0 +1,17 @@
+// Maintenance window annotation pattern
+// Used within detection rules to enrich alerts with maintenance context
+let ActiveMaintenance = _GetWatchlist('OT_MaintenanceWindows')
+| where Status == "Active"
+| where StartTime <= now() and EndTime >= now()
+| mv-expand SrcIp = split(ExpectedSourceIPs, ",") to typeof(string)
+| mv-expand DstAsset = split(AffectedAssets, ",") to typeof(string)
+| project SrcIpAddr = trim(" ", SrcIp),
+DstIpAddr = trim(" ", DstAsset),
+MaintenanceID, EngineerName, ChangeRequestRef,
+ExpectedProtocols;
+// Within the detection rule, left-join against ActiveMaintenance
+// to annotate matching events with maintenance context.
+// Events OUTSIDE maintenance windows have null MaintenanceID
+// and are treated as potential security incidents.
+// Events INSIDE maintenance windows retain the alert but include
+// the MaintenanceID, EngineerName, and ChangeRequestRef for triage.

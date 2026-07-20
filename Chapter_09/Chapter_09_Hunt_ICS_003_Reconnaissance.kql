@@ -1,0 +1,67 @@
+// Hunt-ICS-003: Passive Reconnaissance from Compromised Workstation
+// ================================================================
+// Hypothesis: Adversary mapping OT network from compromised
+// engineering workstation using legitimate tools
+// ATT&CK for ICS: T0840 (Network Connection Enumeration),
+// T0846 (Remote System Discovery), T0842 (Network Sniffing)
+// Kill Chain: Stage 2 -- Discovery
+// Data Source: ASIM NetworkSession, EDR process events, firewall logs
+// ================================================================
+let LookbackPeriod = 7d;
+let ScanThreshold = 15; // Unique destination IPs from single source
+// Step 1: Identify scanning patterns -- single source contacting many OT destinations
+let ScanCandidates =
+_Im_NetworkSession(starttime=ago(LookbackPeriod))
+| where isnotempty(DstIpAddr) and isnotempty(SrcIpAddr)
+// Filter to sessions targeting the OT network ranges
+| where DstIpAddr matches regex @"\^10\.1\.[0-3]\." // Adjust to your OT subnets
+| summarize UniqueDestinations = dcount(DstIpAddr),
+UniquePorts = dcount(DstPortNumber),
+DestinationIPs = make_set(DstIpAddr, 50),
+DestinationPorts = make_set(DstPortNumber, 20),
+SessionCount = count(),
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated),
+Protocols = make_set(NetworkProtocol)
+by SrcIpAddr, SrcHostname
+| where UniqueDestinations >= ScanThreshold;
+// Step 2: Enrich source with asset context
+let EnrichedScans = ScanCandidates
+| join kind=leftouter (
+_GetWatchlist('OT_AssetRegister')
+| project SrcIpAddr = IPAddress, SrcDeviceType = DeviceType,
+SrcPurdueLevel = PurdueLevel
+) on SrcIpAddr;
+// Step 3: Correlate with EDR -- look for discovery tool execution
+let DiscoveryTools = DeviceProcessEvents
+| where TimeGenerated > ago(LookbackPeriod)
+| where FileName in\~ (
+"arp.exe", "ping.exe", "nmap.exe", "nmap", "netstat.exe",
+"nbtstat.exe", "net.exe", "nltest.exe", "dsquery.exe",
+"ipconfig.exe", "tracert.exe", "pathping.exe",
+"nslookup.exe", "route.exe"
+)
+| summarize ToolsUsed = make_set(FileName),
+ToolExecutions = count(),
+CommandLines = make_set(ProcessCommandLine, 10)
+by DeviceName, DeviceId
+| where ToolExecutions >= 3; // Multiple discovery tools = suspicious
+// Step 4: Join scanning behaviour with discovery tool usage
+EnrichedScans
+| join kind=inner (
+DiscoveryTools
+| project SrcHostname = DeviceName, ToolsUsed, ToolExecutions, CommandLines
+) on SrcHostname
+| extend HuntID = "Hunt-ICS-003",
+Hypothesis = "OT network reconnaissance from compromised workstation",
+RiskScore = UniqueDestinations * ToolExecutions, // Higher = more suspicious
+Severity = case(
+UniqueDestinations > 50 and ToolExecutions > 10, "Critical",
+UniqueDestinations > 25 or ToolExecutions > 5, "High",
+"Medium"
+)
+| project HuntID, Severity, RiskScore, FirstSeen, LastSeen,
+SrcIpAddr, SrcHostname, SrcDeviceType, SrcPurdueLevel,
+UniqueDestinations, UniquePorts, SessionCount,
+ToolsUsed, ToolExecutions, CommandLines,
+DestinationPorts, Hypothesis

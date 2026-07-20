@@ -1,0 +1,50 @@
+// Hunt-ICS-002: Covert Channels in Modbus Traffic
+// ================================================================
+// Hypothesis: Adversary exfiltrating data or maintaining C2 via
+// Modbus protocol abuse (unusual register access patterns)
+// ATT&CK for ICS: T0869 (Standard Application Layer Protocol),
+// T0802 (Automated Collection), T0831 (Manipulation of Control)
+// Kill Chain: Stage 2 -- Collection / Command and Control
+// Data Source: Zeek Modbus detailed logs, communication baselines
+// ================================================================
+let LookbackPeriod = 14d;
+let BaselinePeriod = 30d;
+// Step 1: Build register access baseline from historical data
+// What registers does each source normally access on each destination?
+let RegisterBaseline = Zeek_modbus_CL
+| where TimeGenerated between (ago(BaselinePeriod) .. ago(LookbackPeriod))
+| where isnotempty(register_d)
+| summarize BaselineRegisters = make_set(register_d),
+BaselineFuncCodes = make_set(func_code_d),
+BaselineCount = count()
+by SrcIpAddr = id_orig_h, DstIpAddr = id_resp_h;
+// Step 2: Identify register access in the hunting period
+let RecentAccess = Zeek_modbus_CL
+| where TimeGenerated > ago(LookbackPeriod)
+| where isnotempty(register_d)
+| summarize RecentRegisters = make_set(register_d),
+RecentFuncCodes = make_set(func_code_d),
+RequestCount = count(),
+FirstSeen = min(TimeGenerated),
+LastSeen = max(TimeGenerated)
+by SrcIpAddr = id_orig_h, DstIpAddr = id_resp_h;
+// Step 3: Find register access that deviates from baseline
+RecentAccess
+| join kind=leftouter RegisterBaseline on SrcIpAddr, DstIpAddr
+| extend NewRegisters = set_difference(RecentRegisters, BaselineRegisters),
+NewFuncCodes = set_difference(RecentFuncCodes, BaselineFuncCodes)
+| where array_length(NewRegisters) > 0 or array_length(NewFuncCodes)
+> 0
+// Step 4: Enrich with asset context
+| join kind=leftouter (
+_GetWatchlist('OT_AssetRegister')
+| project DstIpAddr = IPAddress, DstHostname = Hostname,
+DstDeviceType = DeviceType, DstPurdueLevel = PurdueLevel,
+DstCrownJewelTier = CrownJewelTier
+) on DstIpAddr
+| project FirstSeen, LastSeen, SrcIpAddr, DstIpAddr, DstHostname,
+DstDeviceType, DstPurdueLevel, DstCrownJewelTier,
+NewRegisters, NewFuncCodes, RequestCount,
+BaselineRegisters, BaselineFuncCodes,
+BaselineDeviation = array_length(NewRegisters)
+| order by BaselineDeviation desc, RequestCount desc

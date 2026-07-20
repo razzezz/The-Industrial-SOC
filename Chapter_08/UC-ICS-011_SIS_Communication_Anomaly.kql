@@ -1,0 +1,133 @@
+// UC-ICS-011: Safety Instrumented System Communication Anomaly
+// ================================================================
+// Description: Detects any network communication directed at a Safety 
+//   Instrumented System (SIS) controller from an unauthorised source 
+//   or outside an active maintenance window. SIS controllers are the 
+//   last line of defence between the control system and a catastrophic 
+//   physical event. ANY unauthorised interaction is the highest 
+//   priority finding the SOC can receive.
+//
+//   The Triton (TRISIS) malware, attributed to actors tracked as 
+//   XENOTIME (Mint Sandstorm-affiliated elements), specifically 
+//   targeted Schneider Electric Triconex SIS controllers. This rule 
+//   addresses the detection gap for Inhibit Response Function (TA0107), 
+//   the most dangerous ATT&CK for ICS tactic.
+//
+// ATT&CK for ICS: T0857 (System Firmware), T0855 (Unauthorised Command 
+//   Message), T0816 (Device Restart/Shutdown)
+// ATT&CK for ICS Tactic: Inhibit Response Function (TA0107)
+// ICS Kill Chain: Stage 2 — Attack on Safety Systems
+// Data Source: ASIM NetworkSession (Zeek, Firewall, OT NDR)
+//
+// Prerequisites:
+//   - OT_AssetRegister populated with SIS controllers (DeviceType = "SIS")
+//   - OT_AssetRegister populated with authorised safety engineering 
+//     workstations (DeviceType = "SafetyEngWorkstation")
+//   - OT_MaintenanceWindows maintained for all SIS maintenance activity
+//   - ASIM NetworkSession parser configured for OT data sources
+//
+// Severity: ALWAYS Critical — no dynamic adjustment. Any unauthorised 
+//   SIS interaction is the highest priority regardless of other context.
+//
+// Triage Guidance:
+//   1. IMMEDIATELY verify with OT engineering whether SIS maintenance 
+//      is occurring (even if not in the maintenance window watchlist)
+//   2. If no maintenance is confirmed, treat as a confirmed incident 
+//      and activate the CSIRT per Chapter 11 playbooks
+//   3. Do NOT attempt to isolate the SIS controller without 
+//      engineering authorisation — the SIS may be actively protecting 
+//      a hazardous process
+//   4. Identify the source system and determine if it is compromised
+//   5. Preserve all logs and telemetry for forensic analysis
+//
+// Known FP Sources:
+//   - SIS maintenance not entered in OT_MaintenanceWindows watchlist
+//   - New safety engineering workstation not yet added to OT_AssetRegister
+//   - SIS self-test or heartbeat traffic (should be baselined and excluded)
+//
+// Tuning Notes:
+//   - This rule intentionally has NO threshold — a single session 
+//     from an unauthorised source to a SIS is a finding
+//   - Maintain the authorised safety engineering workstation list in 
+//     the OT_AssetRegister with DeviceType "SafetyEngWorkstation"
+//   - SIS heartbeat/diagnostic traffic between SIS components should 
+//     be baselined during initial deployment and excluded via the 
+//     SIS_Internal_Comms let statement below
+//   - Work with engineering to ensure ALL SIS maintenance windows are 
+//     registered, including emergency maintenance
+// ================================================================
+
+let DetectionWindow = 15m;
+// Identify all SIS controllers from the asset register
+let SIS_Controllers = _GetWatchlist('OT_AssetRegister')
+    | where DeviceType == "SIS"
+    | project DstIpAddr = IPAddress, DstHostname = Hostname,
+        DstPurdueLevel = PurdueLevel, DstCrownJewelTier = CrownJewelTier,
+        SISType = Model, ProcessArea = Function;
+// Identify authorised safety engineering workstations
+let Authorised_SafetyEng = _GetWatchlist('OT_AssetRegister')
+    | where DeviceType == "SafetyEngWorkstation"
+    | distinct IPAddress;
+// Identify known SIS internal communication paths
+// (SIS controllers communicating with their own I/O modules, voters, etc.)
+let SIS_Internal_Comms = _GetWatchlist('OT_AssetRegister')
+    | where DeviceType in ("SIS", "SIS_IO", "SIS_Voter", "SIS_Logic_Solver")
+    | distinct IPAddress;
+// Active maintenance windows for SIS assets
+let SIS_Maintenance = _GetWatchlist('OT_MaintenanceWindows')
+    | where Status == "Active"
+    | where StartTime <= now() and EndTime >= now()
+    | mv-expand AffectedIP = split(AffectedAssets, ",") to typeof(string)
+    | mv-expand SrcIP = split(ExpectedSourceIPs, ",") to typeof(string)
+    | project MaintenanceID,
+        SrcIpAddr = trim(" ", SrcIP),
+        DstIpAddr = trim(" ", AffectedIP),
+        EngineerName;
+// Detect ANY communication to SIS controllers
+_Im_NetworkSession(starttime=ago(DetectionWindow))
+    // Destination is a SIS controller
+    | join kind=inner SIS_Controllers on DstIpAddr
+    // Exclude authorised safety engineering workstations
+    | where SrcIpAddr !in (Authorised_SafetyEng)
+    // Exclude known SIS internal communication
+    | where SrcIpAddr !in (SIS_Internal_Comms)
+    // Exclude active SIS maintenance windows
+    | join kind=leftanti SIS_Maintenance on SrcIpAddr, DstIpAddr
+    | summarize FirstSeen = min(TimeGenerated),
+        LastSeen = max(TimeGenerated),
+        SessionCount = count(),
+        Protocols = make_set(NetworkProtocol),
+        DstPorts = make_set(DstPortNumber),
+        BytesSent = sum(SrcBytes),
+        BytesReceived = sum(DstBytes)
+        by SrcIpAddr, DstIpAddr, DstHostname,
+           DstPurdueLevel, DstCrownJewelTier,
+           SISType, ProcessArea
+    // Enrich source with asset register context (if available)
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project SrcIpAddr = IPAddress, SrcHostname = Hostname,
+            SrcPurdueLevel = PurdueLevel, SrcDeviceType = DeviceType
+    ) on SrcIpAddr
+    // Classify the alert
+    | extend AlertClassification = case(
+        // Source is completely unknown (not in asset register at all)
+        isempty(SrcHostname), "CRITICAL: Unknown source communicating with SIS",
+        // Source is an IT system (should never talk to SIS)
+        SrcPurdueLevel in ("L4", "L5"), "CRITICAL: IT system communicating with SIS",
+        // Source is an OT system but not authorised for SIS
+        SrcPurdueLevel in ("L2", "L3"), "CRITICAL: Unauthorised OT system communicating with SIS",
+        // Source is another controller (unusual cross-controller communication)
+        SrcDeviceType in ("PLC", "RTU", "DCS"), "HIGH: Controller-to-SIS communication",
+        // Default
+        "CRITICAL: Unauthorised SIS communication")
+    // Severity is ALWAYS Critical for SIS
+    | extend Severity = "Critical"
+    | project FirstSeen, LastSeen, SrcIpAddr, SrcHostname,
+        SrcPurdueLevel, SrcDeviceType,
+        DstIpAddr, DstHostname, DstPurdueLevel,
+        SISType, ProcessArea,
+        SessionCount, Protocols, DstPorts,
+        BytesSent, BytesReceived,
+        AlertClassification, Severity
+    | sort by FirstSeen asc

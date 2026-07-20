@@ -1,0 +1,103 @@
+// =============================================================================
+// Chapter_07_Telemetry_Gap_Assessment.kql
+// OT Telemetry Coverage Assessment Query
+// =============================================================================
+// Chapter:        7 – Phase 2: Assess and Observe
+// Description:    Cross-references the OT_AssetRegister with actual telemetry
+//                 ingestion to identify which crown jewel-adjacent assets lack
+//                 adequate monitoring coverage. Reports on Windows Event Log
+//                 forwarding, Sysmon deployment status, and overall log health
+//                 per OT asset.
+// Data Sources:   SecurityEvent, OT_AssetRegister watchlist
+// Prerequisites:  OT_AssetRegister watchlist populated (Chapter 6)
+// Usage:          Run as first action when assessing telemetry coverage.
+//                 Results show exactly which OT systems are forwarding logs
+//                 and which are not.
+// =============================================================================
+
+// Step 1: Load Windows-based OT assets from the register
+let OT_Assets = _GetWatchlist('OT_AssetRegister')
+    | where OS startswith "Windows"
+    | project Hostname, IPAddress, PurdueLevel, DeviceType,
+        CrownJewelTier, EngineeringOwner;
+
+// Step 2: Assess which assets have recent Windows Event Logs in Sentinel
+let LoggingAssets = SecurityEvent
+    | where TimeGenerated > ago(7d)
+    | summarize
+        LastLogReceived = max(TimeGenerated),
+        EventCount = count(),
+        EventIDs = make_set(EventID, 20)
+        by Computer
+    | project Computer, LastLogReceived, EventCount, EventIDs;
+
+// Step 3: Join and assess coverage
+OT_Assets
+| join kind=leftouter LoggingAssets on $left.Hostname == $right.Computer
+| extend
+    LogStatus = iff(isnotempty(LastLogReceived), "Logging", "No Logs"),
+    // Sysmon produces EventID 1 (Process Create) and EventID 3 (Network Connection)
+    HasSysmon = iff(EventIDs has "1" and EventIDs has "3", "Yes", "No"),
+    // Check for authentication events (4624, 4625)
+    HasAuthLogs = iff(EventIDs has "4624" or EventIDs has "4625", "Yes", "No"),
+    // Check for PowerShell logging (4103, 4104)
+    HasPowerShellLogs = iff(EventIDs has "4103" or EventIDs has "4104", "Yes", "No"),
+    // Days since last log
+    DaysSinceLastLog = iff(isnotempty(LastLogReceived),
+        datetime_diff('day', now(), LastLogReceived), toint(null)),
+    // Log health assessment
+    LogHealth = case(
+        isnull(LastLogReceived), "Critical – No Logs",
+        datetime_diff('hour', now(), LastLogReceived) > 24, "Warning – Stale (>24h)",
+        EventCount < 100, "Warning – Low Volume",
+        "Healthy"
+    )
+| project
+    Hostname,
+    IPAddress,
+    PurdueLevel,
+    DeviceType,
+    CrownJewelTier,
+    EngineeringOwner,
+    LogStatus,
+    LogHealth,
+    LastLogReceived,
+    DaysSinceLastLog,
+    EventCount,
+    HasSysmon,
+    HasAuthLogs,
+    HasPowerShellLogs,
+    // Priority score: lower Purdue level + higher crown jewel tier = higher priority
+    GapPriority = case(
+        LogStatus == "No Logs" and CrownJewelTier == "Tier 1", "P1-Critical",
+        LogStatus == "No Logs" and CrownJewelTier == "Tier 2", "P1-Critical",
+        LogStatus == "No Logs" and PurdueLevel in ("Level 2", "Level 3"), "P2-High",
+        HasSysmon == "No" and CrownJewelTier in ("Tier 1", "Tier 2"), "P2-High",
+        LogStatus == "No Logs", "P3-Medium",
+        HasSysmon == "No", "P3-Medium",
+        "P4-Covered"
+    )
+| sort by CrownJewelTier asc, PurdueLevel asc
+
+
+// =============================================================================
+// Supplementary: Telemetry Coverage Summary Dashboard Query
+// =============================================================================
+// Produces aggregate statistics for reporting to leadership and OT Engineering.
+// =============================================================================
+
+// let OT_Assets = _GetWatchlist('OT_AssetRegister')
+//     | where OS startswith "Windows"
+//     | project Hostname, IPAddress, PurdueLevel, DeviceType, CrownJewelTier;
+// let LoggingAssets = SecurityEvent
+//     | where TimeGenerated > ago(7d)
+//     | distinct Computer;
+// OT_Assets
+// | extend IsLogging = iff(Hostname in (toscalar(LoggingAssets | distinct Computer)), "Yes", "No")
+// | summarize
+//     TotalAssets = count(),
+//     AssetsLogging = countif(IsLogging == "Yes"),
+//     AssetsNotLogging = countif(IsLogging == "No"),
+//     CoveragePercent = round(100.0 * countif(IsLogging == "Yes") / count(), 1)
+//     by PurdueLevel, DeviceType
+// | sort by PurdueLevel asc

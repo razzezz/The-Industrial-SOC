@@ -1,0 +1,125 @@
+// UC-ICS-010: Anomalous Authentication on OT Systems
+// ================================================================
+// Description: Detects authentication anomalies on OT-registered
+//   assets by comparing observed logon events against historical
+//   baselines. Identifies logons from unexpected source hosts,
+//   at unexpected times (outside business hours and maintenance
+//   windows), and using unexpected logon types (e.g., RDP to an
+//   HMI that normally only receives interactive console logons).
+//
+// ATT&CK for ICS: T0859 (Valid Accounts), T0078 (Valid Accounts: 
+//   Domain Accounts)
+// ICS Kill Chain: Stage 2 — OT Network Lateral Movement
+// Data Source: ASIM Authentication (Windows Security Events, EDR)
+//
+// Prerequisites:
+//   - OT_AssetRegister watchlist populated with OT assets
+//   - OT_MaintenanceWindows watchlist maintained
+//   - Windows Security Event Logs forwarded from OT systems
+//     (Event IDs 4624, 4625)
+//   - ASIM Authentication parser configured
+//
+// Severity: Dynamic based on CrownJewelTier and anomaly type
+// ================================================================
+
+let LookbackPeriod = 30d;
+let DetectionWindow = 1h;
+let OffHoursStart = 22; // 10 PM — adjust to your shift pattern
+let OffHoursEnd = 6;    // 6 AM — adjust to your shift pattern
+// Step 1: Build authentication baseline for OT assets
+// Learn which source hosts authenticate to which OT assets,
+// using which logon types, during which hours
+let AuthBaseline = _Im_Authentication(starttime=ago(LookbackPeriod),
+    endtime=ago(DetectionWindow))
+    | where EventResult == "Success"
+    | join kind=inner (
+        _GetWatchlist('OT_AssetRegister')
+        | project TargetIpAddr = IPAddress, TargetHostname = Hostname,
+            PurdueLevel, DeviceType, CrownJewelTier
+    ) on $left.TargetDvcHostname == $right.TargetHostname
+    | summarize
+        LogonCount = count(),
+        DistinctDays = dcount(bin(TimeGenerated, 1d)),
+        LogonTypes = make_set(LogonType, 5),
+        HoursActive = make_set(hourofday(TimeGenerated), 24)
+        by SrcDvcHostname, TargetDvcHostname, TargetUsername;
+// Step 2: Detect anomalous authentications in current window
+let CurrentLogons = _Im_Authentication(starttime=ago(DetectionWindow))
+    | where EventResult == "Success"
+    | join kind=inner (
+        _GetWatchlist('OT_AssetRegister')
+        | project TargetIpAddr = IPAddress, TargetHostname = Hostname,
+            PurdueLevel, DeviceType, CrownJewelTier, EngineeringOwner
+    ) on $left.TargetDvcHostname == $right.TargetHostname;
+// Step 3: Identify anomalies
+// Anomaly Type 1: New source host authenticating to OT asset
+let NewSourceLogons = CurrentLogons
+    | join kind=leftanti AuthBaseline 
+        on SrcDvcHostname, TargetDvcHostname
+    | extend AnomalyType = "NewSource",
+        AnomalyDescription = strcat("First-time authentication from ", 
+            SrcDvcHostname, " to OT asset ", TargetDvcHostname);
+// Anomaly Type 2: Off-hours authentication (outside maintenance)
+let OffHoursLogons = CurrentLogons
+    | where hourofday(TimeGenerated) >= OffHoursStart 
+        or hourofday(TimeGenerated) < OffHoursEnd
+    // Exclude active maintenance windows
+    | join kind=leftanti (
+        _GetWatchlist('OT_MaintenanceWindows')
+        | where Status == "Active"
+        | where StartTime <= now() and EndTime >= now()
+        | mv-expand DstAsset = split(AffectedAssets, ",") to typeof(string)
+        | project TargetDvcHostname = trim(" ", DstAsset)
+    ) on TargetDvcHostname
+    | extend AnomalyType = "OffHours",
+        AnomalyDescription = strcat("Off-hours authentication to OT asset ",
+            TargetDvcHostname, " at ", format_datetime(TimeGenerated, 'HH:mm'),
+            " — no active maintenance window");
+// Anomaly Type 3: Unexpected logon type (e.g., RDP to HMI)
+let UnexpectedLogonType = CurrentLogons
+    | join kind=inner AuthBaseline 
+        on SrcDvcHostname, TargetDvcHostname
+    | where LogonType !in (LogonTypes)
+    | extend AnomalyType = "UnexpectedLogonType",
+        AnomalyDescription = strcat("Logon type '", LogonType, 
+            "' to OT asset ", TargetDvcHostname, 
+            " — not seen in 30-day baseline. Expected types: ",
+            tostring(LogonTypes));
+// Step 4: Union all anomalies
+NewSourceLogons
+| union OffHoursLogons
+| union UnexpectedLogonType
+// Step 5: Check for maintenance window context (annotate, don't suppress)
+| join kind=leftouter (
+    _GetWatchlist('OT_MaintenanceWindows')
+    | where Status in ("Active", "Scheduled")
+    | where StartTime <= now() and EndTime >= now()
+    | mv-expand DstAsset = split(AffectedAssets, ",") to typeof(string)
+    | project TargetDvcHostname = trim(" ", DstAsset),
+        MaintenanceID, MaintenanceEngineer = EngineerName,
+        ChangeRequestRef
+) on TargetDvcHostname
+// Step 6: Calculate severity
+| extend Severity = case(
+    AnomalyType == "NewSource" and CrownJewelTier == "Tier1", "Critical",
+    AnomalyType == "NewSource" and CrownJewelTier == "Tier2", "High",
+    AnomalyType == "OffHours" and CrownJewelTier in ("Tier1", "Tier2"), "High",
+    AnomalyType == "UnexpectedLogonType" and CrownJewelTier == "Tier1", "High",
+    AnomalyType == "NewSource", "Medium",
+    AnomalyType == "OffHours", "Medium",
+    "Low")
+// Step 7: Annotate with maintenance context
+| extend InMaintenanceWindow = iff(isnotempty(MaintenanceID), true, false)
+| extend TriageNote = iff(InMaintenanceWindow,
+    strcat("Activity during maintenance window ", MaintenanceID,
+        " — verify with engineer ", MaintenanceEngineer,
+        " (", ChangeRequestRef, ")"),
+    "No active maintenance window — investigate as potential security incident")
+// Output
+| project TimeGenerated, AnomalyType, AnomalyDescription, Severity,
+    SrcDvcHostname, SrcIpAddr, TargetDvcHostname, TargetIpAddr,
+    TargetUsername, LogonType, PurdueLevel, DeviceType,
+    CrownJewelTier, EngineeringOwner,
+    InMaintenanceWindow, MaintenanceID, MaintenanceEngineer,
+    ChangeRequestRef, TriageNote
+| sort by Severity asc, AnomalyType asc

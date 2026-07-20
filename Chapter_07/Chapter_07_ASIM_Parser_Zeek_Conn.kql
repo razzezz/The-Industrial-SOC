@@ -1,0 +1,58 @@
+// Custom ASIM Parser: Zeek conn.log to NetworkSession
+// Parser name: vimNetworkSessionZeekConn
+// Schema: NetworkSession v0.2.6
+let parser = (
+starttime: datetime = datetime(null),
+endtime: datetime = datetime(null),
+srcipaddr_has_any_prefix: dynamic = dynamic([]),
+dstipaddr_has_any_prefix: dynamic = dynamic([]),
+ipaddr_has_any_prefix: dynamic = dynamic([]),
+dstportnumber: int = int(null),
+hostname_has_any: dynamic = dynamic([]),
+dvcaction: dynamic = dynamic([]),
+eventresult: string = '*',
+disabled: bool = false
+) {
+Zeek_conn_CL
+| where not(disabled)
+| where (isnull(starttime) or TimeGenerated >= starttime)
+and (isnull(endtime) or TimeGenerated <= endtime)
+| where (array_length(srcipaddr_has_any_prefix) == 0
+or has_any_ipv4_prefix(id_orig_h_s, srcipaddr_has_any_prefix))
+| where (array_length(dstipaddr_has_any_prefix) == 0
+or has_any_ipv4_prefix(id_resp_h_s, dstipaddr_has_any_prefix))
+| where (isnull(dstportnumber)
+or id_resp_p_d == dstportnumber)
+| extend
+EventType = "NetworkSession",
+EventSchema = "NetworkSession",
+EventSchemaVersion = "0.2.6",
+EventVendor = "Zeek",
+EventProduct = "Zeek",
+EventCount = toint(1),
+EventResult = "Success",
+EventSeverity = "Informational",
+DvcAction = "Allow",
+// Source fields
+SrcIpAddr = tostring(id_orig_h_s),
+SrcPortNumber = toint(id_orig_p_d),
+// Destination fields
+DstIpAddr = tostring(id_resp_h_s),
+DstPortNumber = toint(id_resp_p_d),
+// Network fields
+NetworkProtocol = tostring(proto_s),
+NetworkApplicationProtocol = tostring(service_s),
+NetworkDirection = "Local",
+NetworkDuration = toint(duration_d * 1000),
+SrcBytes = tolong(orig_bytes_d),
+DstBytes = tolong(resp_bytes_d),
+NetworkBytes = tolong(orig_bytes_d + resp_bytes_d),
+SrcPackets = tolong(orig_pkts_d),
+DstPackets = tolong(resp_pkts_d),
+NetworkPackets = tolong(orig_pkts_d + resp_pkts_d),
+// Device fields
+DvcHostname = tostring(Computer),
+EventStartTime = TimeGenerated,
+EventEndTime = TimeGenerated
+};
+parser A similar approach is used to create parsers for Zeek's ICS-specific

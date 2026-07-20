@@ -1,0 +1,379 @@
+// Chapter_09_Hunting_Queries.kql
+// ================================================================
+// OT/ICS Threat Hunting Query Library — Microsoft Sentinel (KQL)
+// ================================================================
+// Description: Complete set of KQL hunting queries from Chapter 9.
+//   Each query is designed for use in Microsoft Sentinel with ASIM
+//   normalisation and OT watchlist enrichment.
+//
+// Prerequisites:
+//   - Zeek with CISA ICSNPP parsers (Modbus, DNP3, S7Comm, ENIP/CIP)
+//   - Zeek logs ingested into Sentinel (Zeek_modbus_CL, etc.)
+//   - ASIM NetworkSession and Authentication parsers configured
+//   - OT_AssetRegister watchlist populated (Chapter 6)
+//   - OT_MaintenanceWindows watchlist maintained (Chapter 7)
+//   - EDR deployed on engineering workstations (Chapter 7)
+//
+// Reference: Chapter 9 — The OT Threat Hunting Mindset
+// ================================================================
+
+
+// ================================================================
+// Hunt-ICS-001: Unauthorised Firmware Operations
+// ================================================================
+// Hypothesis: Adversary has uploaded modified firmware to PLCs
+// ATT&CK for ICS: T0839 (Module Firmware), T0836 (Modify Program)
+// Kill Chain: Stage 2 — Persistence / Impair Process Control
+// ================================================================
+
+let Hunt001_LookbackPeriod = 30d;
+
+let FirmwareOps = Zeek_modbus_CL
+    | where TimeGenerated > ago(Hunt001_LookbackPeriod)
+    | where func_code_d == 43              // Read/Write Device Identification (MEI)
+        or func_code_d == 23               // Read/Write Multiple Registers (bulk)
+        or func_code_d in (100 .. 127)     // Vendor-specific function codes
+    | project TimeGenerated,
+        SrcIpAddr = id_orig_h,
+        DstIpAddr = id_resp_h,
+        FuncCode = func_code_d,
+        uid_s;
+
+let EnrichedFirmwareOps = FirmwareOps
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project DstIpAddr = IPAddress, DstHostname = Hostname,
+            DstDeviceType = DeviceType, DstPurdueLevel = PurdueLevel,
+            DstCrownJewelTier = CrownJewelTier
+    ) on DstIpAddr
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project SrcIpAddr = IPAddress, SrcHostname = Hostname,
+            SrcDeviceType = DeviceType
+    ) on SrcIpAddr;
+
+let ActiveMaintenance = _GetWatchlist('OT_MaintenanceWindows')
+    | where Status in ("Active", "Scheduled")
+    | mv-expand AffectedAsset = split(AffectedAssets, ";") to typeof(string)
+    | mv-expand SrcIp = split(ExpectedSourceIPs, ",") to typeof(string)
+    | project MaintenanceID,
+        SrcIp = trim(" ", SrcIp),
+        AffectedAsset = trim(" ", AffectedAsset),
+        StartTime, EndTime, EngineerName, ChangeRequestRef;
+
+EnrichedFirmwareOps
+| join kind=leftanti (
+    ActiveMaintenance
+    | project SrcIpAddr = SrcIp, DstIpAddr = AffectedAsset, StartTime, EndTime
+) on SrcIpAddr, DstIpAddr
+| summarize FirmwareOpCount = count(),
+    FuncCodesUsed = make_set(FuncCode),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    UniqueTargets = dcount(DstIpAddr),
+    Targets = make_set(DstIpAddr)
+    by SrcIpAddr, SrcHostname, SrcDeviceType
+| where FirmwareOpCount > 0
+| extend HuntID = "Hunt-ICS-001",
+    Hypothesis = "Unauthorised firmware modification",
+    Severity = case(
+        UniqueTargets > 3, "Critical",
+        FirmwareOpCount > 10, "High",
+        "Medium"
+    )
+| project HuntID, Severity, FirstSeen, LastSeen,
+    SrcIpAddr, SrcHostname, SrcDeviceType,
+    UniqueTargets, Targets, FirmwareOpCount, FuncCodesUsed,
+    Hypothesis
+| order by Severity desc, FirmwareOpCount desc;
+
+
+// ================================================================
+// Hunt-ICS-002: Covert Channels in Modbus Traffic
+// ================================================================
+// Hypothesis: Adversary exfiltrating data or maintaining C2 via
+//   Modbus protocol abuse (unusual register access patterns)
+// ATT&CK for ICS: T0869, T0802, T0831
+// Kill Chain: Stage 2 — Collection / Command and Control
+// ================================================================
+
+let Hunt002_LookbackPeriod = 14d;
+let Hunt002_BaselinePeriod = 30d;
+
+let RegisterBaseline = Zeek_modbus_CL
+    | where TimeGenerated between (ago(Hunt002_BaselinePeriod) .. ago(Hunt002_LookbackPeriod))
+    | where isnotempty(register_d)
+    | summarize BaselineRegisters = make_set(register_d),
+        BaselineFuncCodes = make_set(func_code_d),
+        BaselineCount = count()
+        by SrcIpAddr = id_orig_h, DstIpAddr = id_resp_h;
+
+let RecentAccess = Zeek_modbus_CL
+    | where TimeGenerated > ago(Hunt002_LookbackPeriod)
+    | where isnotempty(register_d)
+    | summarize RecentRegisters = make_set(register_d),
+        RecentFuncCodes = make_set(func_code_d),
+        RequestCount = count(),
+        FirstSeen = min(TimeGenerated),
+        LastSeen = max(TimeGenerated)
+        by SrcIpAddr = id_orig_h, DstIpAddr = id_resp_h;
+
+RecentAccess
+| join kind=leftouter RegisterBaseline on SrcIpAddr, DstIpAddr
+| extend NewRegisters = set_difference(RecentRegisters, BaselineRegisters),
+    NewFuncCodes = set_difference(RecentFuncCodes, BaselineFuncCodes)
+| where array_length(NewRegisters) > 0 or array_length(NewFuncCodes) > 0
+| join kind=leftouter (
+    _GetWatchlist('OT_AssetRegister')
+    | project DstIpAddr = IPAddress, DstHostname = Hostname,
+        DstDeviceType = DeviceType, DstPurdueLevel = PurdueLevel,
+        DstCrownJewelTier = CrownJewelTier
+) on DstIpAddr
+| extend HuntID = "Hunt-ICS-002",
+    Hypothesis = "Covert channel or data exfiltration via Modbus",
+    BaselineDeviation = array_length(NewRegisters)
+| project HuntID, FirstSeen, LastSeen, SrcIpAddr, DstIpAddr, DstHostname,
+    DstDeviceType, DstPurdueLevel, DstCrownJewelTier,
+    NewRegisters, NewFuncCodes, RequestCount,
+    BaselineRegisters, BaselineFuncCodes, BaselineDeviation,
+    Hypothesis
+| order by BaselineDeviation desc, RequestCount desc;
+
+
+// ================================================================
+// Hunt-ICS-002a: Modbus Timing Anomaly Detection
+// ================================================================
+// Sub-hunt: Identifies Modbus polling patterns that deviate from
+//   expected timing — potential covert channel indicator
+// ATT&CK for ICS: T0869, T0802
+// ================================================================
+
+let Hunt002a_LookbackPeriod = 7d;
+
+Zeek_modbus_CL
+| where TimeGenerated > ago(Hunt002a_LookbackPeriod)
+| sort by id_orig_h, id_resp_h, TimeGenerated asc
+| serialize
+| extend PrevTime = prev(TimeGenerated),
+    PrevSrc = prev(id_orig_h),
+    PrevDst = prev(id_resp_h)
+| where id_orig_h == PrevSrc and id_resp_h == PrevDst
+| extend IntervalMs = datetime_diff('millisecond', TimeGenerated, PrevTime)
+| summarize AvgIntervalMs = avg(IntervalMs),
+    StdDevIntervalMs = stdev(IntervalMs),
+    MinIntervalMs = min(IntervalMs),
+    MaxIntervalMs = max(IntervalMs),
+    SessionCount = count()
+    by SrcIpAddr = id_orig_h, DstIpAddr = id_resp_h
+| where SessionCount > 100  // Need sufficient data for statistics
+// Flag sources with high timing variability (irregular polling = suspicious)
+| extend CoV = iff(AvgIntervalMs > 0, StdDevIntervalMs / AvgIntervalMs, 0.0)
+| where CoV > 1.0  // Coefficient of variation > 1 indicates irregular timing
+| join kind=leftouter (
+    _GetWatchlist('OT_AssetRegister')
+    | project DstIpAddr = IPAddress, DstHostname = Hostname,
+        DstDeviceType = DeviceType, DstCrownJewelTier = CrownJewelTier
+) on DstIpAddr
+| extend HuntID = "Hunt-ICS-002a",
+    Hypothesis = "Irregular Modbus timing pattern (potential covert channel)"
+| project HuntID, SrcIpAddr, DstIpAddr, DstHostname, DstDeviceType,
+    DstCrownJewelTier, AvgIntervalMs, StdDevIntervalMs, CoV,
+    MinIntervalMs, MaxIntervalMs, SessionCount, Hypothesis
+| order by CoV desc;
+
+
+// ================================================================
+// Hunt-ICS-003: Passive Reconnaissance via Network Scanning
+// ================================================================
+// Hypothesis: Adversary mapping OT network from compromised
+//   engineering workstation using legitimate tools
+// ATT&CK for ICS: T0840, T0846, T0842
+// Kill Chain: Stage 2 — Discovery
+// ================================================================
+
+let Hunt003_LookbackPeriod = 7d;
+let Hunt003_ScanThreshold = 15;
+
+// Identify scanning patterns
+let ScanCandidates = _Im_NetworkSession(starttime=ago(Hunt003_LookbackPeriod))
+    | where isnotempty(DstIpAddr) and isnotempty(SrcIpAddr)
+    // NOTE: Adjust the regex below to match YOUR OT network subnets
+    | where DstIpAddr matches regex @"^10\.1\.[0-3]\."
+    | summarize UniqueDestinations = dcount(DstIpAddr),
+        UniquePorts = dcount(DstPortNumber),
+        DestinationIPs = make_set(DstIpAddr, 50),
+        DestinationPorts = make_set(DstPortNumber, 20),
+        SessionCount = count(),
+        FirstSeen = min(TimeGenerated),
+        LastSeen = max(TimeGenerated),
+        Protocols = make_set(NetworkProtocol)
+        by SrcIpAddr, SrcHostname
+    | where UniqueDestinations >= Hunt003_ScanThreshold;
+
+// Enrich source with asset context
+let EnrichedScans = ScanCandidates
+    | join kind=leftouter (
+        _GetWatchlist('OT_AssetRegister')
+        | project SrcIpAddr = IPAddress, SrcDeviceType = DeviceType,
+            SrcPurdueLevel = PurdueLevel
+    ) on SrcIpAddr;
+
+// Correlate with EDR — discovery tool execution
+let DiscoveryTools = DeviceProcessEvents
+    | where TimeGenerated > ago(Hunt003_LookbackPeriod)
+    | where FileName in~ (
+        "arp.exe", "ping.exe", "nmap.exe", "nmap", "netstat.exe",
+        "nbtstat.exe", "net.exe", "nltest.exe", "dsquery.exe",
+        "ipconfig.exe", "tracert.exe", "pathping.exe",
+        "nslookup.exe", "route.exe"
+    )
+    | summarize ToolsUsed = make_set(FileName),
+        ToolExecutions = count(),
+        CommandLines = make_set(ProcessCommandLine, 10)
+        by DeviceName, DeviceId
+    | where ToolExecutions >= 3;
+
+// Join scanning behaviour with discovery tool usage
+EnrichedScans
+| join kind=inner (
+    DiscoveryTools
+    | project SrcHostname = DeviceName, ToolsUsed, ToolExecutions, CommandLines
+) on SrcHostname
+| extend HuntID = "Hunt-ICS-003",
+    Hypothesis = "OT network reconnaissance from compromised workstation",
+    RiskScore = UniqueDestinations * ToolExecutions,
+    Severity = case(
+        UniqueDestinations > 50 and ToolExecutions > 10, "Critical",
+        UniqueDestinations > 25 or ToolExecutions > 5, "High",
+        "Medium"
+    )
+| project HuntID, Severity, RiskScore, FirstSeen, LastSeen,
+    SrcIpAddr, SrcHostname, SrcDeviceType, SrcPurdueLevel,
+    UniqueDestinations, UniquePorts, SessionCount,
+    ToolsUsed, ToolExecutions, CommandLines,
+    DestinationPorts, Hypothesis
+| order by RiskScore desc;
+
+
+// ================================================================
+// Hunt-ICS-003a: Living-off-the-Land on Engineering Workstations
+// ================================================================
+// Sub-hunt: Detects use of native Windows tools on engineering
+//   workstations that may indicate Volt Typhoon-style tradecraft
+// ATT&CK for ICS: T0807 (Command-Line Interface)
+// ================================================================
+
+let Hunt003a_LookbackPeriod = 14d;
+
+// Define engineering workstations from asset register
+let EngineeringWorkstations = _GetWatchlist('OT_AssetRegister')
+    | where DeviceType in (
+        "Engineering Workstation", "EWS", "SCADA Server", "HMI"
+    )
+    | project DeviceName = Hostname, IPAddress, PurdueLevel, CrownJewelTier;
+
+// Living-off-the-land binaries suspicious on OT workstations
+let LOLBins = dynamic([
+    "powershell.exe", "pwsh.exe", "cmd.exe", "wmic.exe",
+    "certutil.exe", "bitsadmin.exe", "mshta.exe", "regsvr32.exe",
+    "rundll32.exe", "cscript.exe", "wscript.exe", "msiexec.exe",
+    "ntdsutil.exe", "dsquery.exe", "nltest.exe", "csvde.exe",
+    "ldifde.exe", "net.exe", "net1.exe", "tasklist.exe",
+    "systeminfo.exe", "whoami.exe", "qprocess.exe",
+    "query.exe", "sc.exe", "reg.exe"
+]);
+
+DeviceProcessEvents
+| where TimeGenerated > ago(Hunt003a_LookbackPeriod)
+| where FileName in~ (LOLBins)
+| join kind=inner (
+    EngineeringWorkstations
+    | project DeviceName
+) on DeviceName
+| summarize LOLBinCount = count(),
+    UniqueLOLBins = dcount(FileName),
+    LOLBinsUsed = make_set(FileName),
+    SampleCommands = make_set(ProcessCommandLine, 15),
+    UniqueUsers = dcount(AccountName),
+    Users = make_set(AccountName),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+    by DeviceName
+| where UniqueLOLBins >= 3  // Multiple LOL binaries = higher suspicion
+| join kind=leftouter (
+    EngineeringWorkstations
+    | project DeviceName, PurdueLevel, CrownJewelTier
+) on DeviceName
+| extend HuntID = "Hunt-ICS-003a",
+    Hypothesis = "Living-off-the-land activity on engineering workstation",
+    Severity = case(
+        UniqueLOLBins >= 8, "Critical",
+        UniqueLOLBins >= 5, "High",
+        "Medium"
+    )
+| project HuntID, Severity, DeviceName, PurdueLevel, CrownJewelTier,
+    FirstSeen, LastSeen, UniqueLOLBins, LOLBinsUsed, LOLBinCount,
+    UniqueUsers, Users, SampleCommands, Hypothesis
+| order by UniqueLOLBins desc;
+
+
+// ================================================================
+// Hunt-ICS-004: Vendor Access Anomalies
+// ================================================================
+// Hypothesis: Adversary has compromised vendor credentials and is
+//   accessing OT environment via legitimate vendor access paths
+// ATT&CK for ICS: T0822 (External Remote Services), T0859 (Valid Accounts)
+// Kill Chain: Boundary Traversal / Initial Access
+// ================================================================
+
+let Hunt004_LookbackPeriod = 30d;
+
+// Identify vendor accounts (naming convention based — adjust to your environment)
+let VendorAccounts = _Im_Authentication(starttime=ago(Hunt004_LookbackPeriod))
+    | where TargetUsername matches regex @"(?i)(vendor|contractor|ext[-_]|3p[-_]|svc[-_]vendor)"
+        or TargetUsername in (_GetWatchlist('VendorAccounts') | project Username)
+    | summarize AuthCount = count(),
+        SuccessCount = countif(EventResult == "Success"),
+        FailCount = countif(EventResult == "Failure"),
+        UniqueSourceIPs = dcount(SrcIpAddr),
+        SourceIPs = make_set(SrcIpAddr, 10),
+        UniqueTargets = dcount(TargetHostname),
+        Targets = make_set(TargetHostname, 10),
+        AuthTypes = make_set(EventSubType),
+        FirstSeen = min(TimeGenerated),
+        LastSeen = max(TimeGenerated),
+        // Time-of-day analysis
+        OffHoursCount = countif(
+            hourofday(TimeGenerated) < 7 or hourofday(TimeGenerated) > 19
+        ),
+        WeekendCount = countif(
+            dayofweek(TimeGenerated) == 0d or dayofweek(TimeGenerated) == 6d
+        )
+        by TargetUsername
+    | where AuthCount > 0;
+
+// Flag anomalies
+VendorAccounts
+| extend FailRatio = round(1.0 * FailCount / AuthCount, 2),
+    OffHoursRatio = round(1.0 * OffHoursCount / AuthCount, 2),
+    WeekendRatio = round(1.0 * WeekendCount / AuthCount, 2)
+| extend AnomalyFlags = strcat(
+    iff(FailRatio > 0.3, "HIGH_FAIL_RATE,", ""),
+    iff(OffHoursRatio > 0.2, "OFF_HOURS_ACCESS,", ""),
+    iff(WeekendRatio > 0.1, "WEEKEND_ACCESS,", ""),
+    iff(UniqueSourceIPs > 3, "MULTI_SOURCE_IP,", ""),
+    iff(UniqueTargets > 5, "BROAD_TARGET_SCOPE,", "")
+)
+| where AnomalyFlags != ""
+| extend HuntID = "Hunt-ICS-004",
+    Hypothesis = "Compromised vendor credentials used for OT access",
+    Severity = case(
+        AnomalyFlags contains "HIGH_FAIL_RATE" and AnomalyFlags contains "OFF_HOURS_ACCESS", "Critical",
+        AnomalyFlags contains "BROAD_TARGET_SCOPE", "High",
+        "Medium"
+    )
+| project HuntID, Severity, TargetUsername, FirstSeen, LastSeen,
+    AuthCount, SuccessCount, FailCount, FailRatio,
+    UniqueSourceIPs, SourceIPs, UniqueTargets, Targets,
+    OffHoursRatio, WeekendRatio, AnomalyFlags, Hypothesis
+| order by Severity desc;

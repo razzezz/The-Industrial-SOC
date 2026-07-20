@@ -1,0 +1,203 @@
+# Chapter_09_Suricata_Hunting.rules
+# ================================================================
+# OT/ICS Threat Hunting Signatures for Suricata
+# ================================================================
+# Description: Suricata rules for detecting OT-specific 
+#   reconnaissance, discovery, and suspicious protocol operations
+#   to support Chapter 9 hunting scenarios.
+#
+# Prerequisites:
+#   - Suricata 7.0+ with ICS protocol support
+#   - Deployed on SPAN/TAP monitoring OT network traffic
+#   - App-layer protocol detection enabled for Modbus, DNP3, ENIP
+#
+# Usage: Deploy to Suricata sensors monitoring OT network segments.
+#   These rules supplement the detection rules from Chapter 7 with
+#   hunting-specific signatures that cast a wider net for suspicious
+#   activity.
+#
+# SID Range: 1600001-1600099 (Chapter 9 hunting rules)
+#
+# Reference: Chapter 9 — The OT Threat Hunting Mindset
+# ================================================================
+
+
+# ================================================================
+# Hunt-ICS-001: Firmware-Related Protocol Operations
+# ================================================================
+
+# Modbus FC 43 — Read/Write Device Identification (MEI)
+# Used for firmware version queries and device identification.
+# Rare in normal SCADA polling — investigate any occurrence.
+alert modbus any any -> any 502 (msg:"ICS HUNT - Modbus Device Identification Request (FC43 MEI)"; \
+    flow:established,to_server; \
+    content:"|00 00|"; offset:0; depth:2; \
+    content:"|2b|"; offset:7; depth:1; \
+    classtype:policy-violation; \
+    sid:1600010; rev:1; \
+    metadata:mitre_technique T0839, mitre_technique T0846, \
+    hunt_id Hunt-ICS-001, purdue_level L1, severity medium;)
+
+# Modbus FC 16 — Write Multiple Registers (bulk write)
+# Large register writes may indicate firmware upload or config change.
+# Flag writes exceeding typical operational size.
+alert modbus any any -> any 502 (msg:"ICS HUNT - Modbus Large Write Multiple Registers (FC16 Bulk)"; \
+    flow:established,to_server; \
+    content:"|00 00|"; offset:0; depth:2; \
+    content:"|10|"; offset:7; depth:1; \
+    # Byte count field > 100 bytes indicates bulk transfer
+    byte_test:1,>,100,12; \
+    classtype:policy-violation; \
+    sid:1600011; rev:1; \
+    metadata:mitre_technique T0839, mitre_technique T0836, \
+    hunt_id Hunt-ICS-001, purdue_level L1, severity high;)
+
+# Modbus FC 8 — Diagnostics (multiple sub-functions)
+# Already covered in UC-ICS-005 for specific sub-functions.
+# This broader rule catches ANY diagnostic function code usage.
+alert modbus any any -> any 502 (msg:"ICS HUNT - Modbus Diagnostic Function (FC8 Any Sub-function)"; \
+    flow:established,to_server; \
+    content:"|00 00|"; offset:0; depth:2; \
+    content:"|08|"; offset:7; depth:1; \
+    classtype:policy-violation; \
+    sid:1600012; rev:1; \
+    metadata:mitre_technique T0872, \
+    hunt_id Hunt-ICS-001, purdue_level L1, severity medium;)
+
+
+# ================================================================
+# Hunt-ICS-003: OT Protocol Discovery and Reconnaissance
+# ================================================================
+
+# EtherNet/IP ListIdentity — TCP
+# Used to discover Allen-Bradley/Rockwell devices on the network.
+# Expected only from known engineering workstations.
+alert tcp any any -> any 44818 (msg:"ICS HUNT - EtherNet/IP ListIdentity Request TCP (Device Enumeration)"; \
+    flow:established,to_server; \
+    content:"|00 04|"; offset:0; depth:2; \
+    classtype:network-scan; \
+    sid:1600001; rev:1; \
+    metadata:mitre_technique T0846, \
+    hunt_id Hunt-ICS-003, purdue_level L1-L2, severity medium;)
+
+# EtherNet/IP ListIdentity — UDP broadcast
+# Broadcast discovery is more suspicious than targeted queries
+# as it maps the entire network segment.
+alert udp any any -> any 44818 (msg:"ICS HUNT - EtherNet/IP ListIdentity Broadcast UDP (Network Discovery)"; \
+    content:"|00 04|"; offset:0; depth:2; \
+    classtype:network-scan; \
+    sid:1600002; rev:1; \
+    metadata:mitre_technique T0846, \
+    hunt_id Hunt-ICS-003, purdue_level L1-L2, severity high;)
+
+# Profinet DCP — Device Discovery
+# Profinet Discovery and Configuration Protocol is used to identify
+# Siemens and other Profinet-compatible devices. Broadcast DCP
+# Identify requests from non-engineering sources are suspicious.
+alert udp any any -> any any (msg:"ICS HUNT - Profinet DCP Identify All Request (Network Discovery)"; \
+    content:"|fe ff|"; offset:0; depth:2; \
+    content:"|04 00|"; offset:2; depth:2; \
+    classtype:network-scan; \
+    sid:1600003; rev:1; \
+    metadata:mitre_technique T0846, \
+    hunt_id Hunt-ICS-003, purdue_level L1-L2, severity medium;)
+
+# S7Comm — CPU Information Request
+# Querying Siemens PLC CPU info is a reconnaissance step.
+# Maps to ATT&CK for ICS T0888 (Remote System Information Discovery).
+alert tcp any any -> any 102 (msg:"ICS HUNT - S7Comm CPU Information Request (System Discovery)"; \
+    flow:established,to_server; \
+    content:"|03 00|"; offset:0; depth:2; \
+    content:"|32|"; offset:7; depth:1; \
+    content:"|00 01|"; offset:8; depth:2; \
+    classtype:network-scan; \
+    sid:1600004; rev:1; \
+    metadata:mitre_technique T0888, mitre_technique T0846, \
+    hunt_id Hunt-ICS-003, purdue_level L1, severity medium;)
+
+# Modbus FC 17 — Report Slave ID
+# Reports device model and status. Useful for reconnaissance.
+# Rare in normal SCADA operations.
+alert modbus any any -> any 502 (msg:"ICS HUNT - Modbus Report Slave ID (FC17 Device Enumeration)"; \
+    flow:established,to_server; \
+    content:"|00 00|"; offset:0; depth:2; \
+    content:"|11|"; offset:7; depth:1; \
+    classtype:network-scan; \
+    sid:1600005; rev:1; \
+    metadata:mitre_technique T0846, mitre_technique T0888, \
+    hunt_id Hunt-ICS-003, purdue_level L1, severity medium;)
+
+
+# ================================================================
+# Hunt-ICS-002: Covert Channel / Protocol Abuse Indicators
+# ================================================================
+
+# Modbus write to holding registers outside typical process range
+# Most SCADA systems use a defined register range. Writes outside
+# this range may indicate covert channel or unauthorised modification.
+# NOTE: Adjust register range to match YOUR environment's process map.
+alert modbus any any -> any 502 (msg:"ICS HUNT - Modbus Write to High Register Range (Potential Covert Channel)"; \
+    flow:established,to_server; \
+    content:"|00 00|"; offset:0; depth:2; \
+    content:"|06|"; offset:7; depth:1; \
+    # Register address > 1000 (0x03E8) — adjust threshold
+    byte_test:2,>,1000,8; \
+    classtype:policy-violation; \
+    sid:1600020; rev:1; \
+    metadata:mitre_technique T0869, mitre_technique T0831, \
+    hunt_id Hunt-ICS-002, purdue_level L1, severity medium;)
+
+# Modbus FC 6 Write Single Register — from non-baselined source
+# Uses $EXTERNAL_NET to flag writes from unexpected sources.
+# Configure EXTERNAL_NET in suricata.yaml to exclude known SCADA/HMI IPs.
+alert modbus !$HOME_NET any -> $HOME_NET 502 (msg:"ICS HUNT - Modbus Write from Non-Baselined Source"; \
+    flow:established,to_server; \
+    content:"|00 00|"; offset:0; depth:2; \
+    content:"|06|"; offset:7; depth:1; \
+    classtype:policy-violation; \
+    sid:1600021; rev:1; \
+    metadata:mitre_technique T0855, mitre_technique T0831, \
+    hunt_id Hunt-ICS-002, purdue_level L1, severity high;)
+
+# DNP3 File Transport — potential firmware or config exfiltration
+# DNP3 file transport operations are rare in normal operations
+# and may indicate data exfiltration or firmware manipulation.
+alert tcp any any -> any 20000 (msg:"ICS HUNT - DNP3 File Transport Operation (Data Exfiltration Indicator)"; \
+    flow:established,to_server; \
+    content:"|05 64|"; offset:0; depth:2; \
+    # DNP3 application layer function codes for file operations
+    # FC 25 (Open File), FC 26 (Close File), FC 27 (Delete File),
+    # FC 28 (Get File Info), FC 30 (Abort File)
+    byte_test:1,>=,25,12; \
+    byte_test:1,<=,30,12; \
+    classtype:policy-violation; \
+    sid:1600022; rev:1; \
+    metadata:mitre_technique T0802, mitre_technique T0839, \
+    hunt_id Hunt-ICS-002, purdue_level L1, severity high;)
+
+
+# ================================================================
+# General OT Hunting — Anomaly Indicators
+# ================================================================
+
+# Multiple ICS protocol ports from single source in short window
+# A single source connecting to Modbus (502), ENIP (44818), S7 (102),
+# and DNP3 (20000) is likely performing multi-protocol reconnaissance.
+alert tcp any any -> any [102,502,20000,44818,47808] (msg:"ICS HUNT - Multi-Protocol ICS Connection (Reconnaissance Indicator)"; \
+    flow:to_server,established; \
+    flowbits:set,ics_multiproto; \
+    threshold:type both, track by_src, count 3, seconds 300; \
+    classtype:network-scan; \
+    sid:1600050; rev:1; \
+    metadata:mitre_technique T0840, mitre_technique T0846, \
+    hunt_id Hunt-ICS-003, purdue_level L1-L2, severity high;)
+
+# BACnet Who-Is broadcast — Building Automation discovery
+# Relevant for environments with BACnet building automation systems.
+alert udp any any -> any 47808 (msg:"ICS HUNT - BACnet Who-Is Broadcast (BAS Device Discovery)"; \
+    content:"|81|"; offset:0; depth:1; \
+    content:"|08|"; offset:7; depth:1; \
+    classtype:network-scan; \
+    sid:1600051; rev:1; \
+    metadata:mitre_technique T0846, \
+    hunt_id Hunt-ICS-003, purdue_level L2-L3, severity low;)

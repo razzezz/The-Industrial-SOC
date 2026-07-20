@@ -1,0 +1,105 @@
+# UC-ICS-012: IDMZ Boundary Monitoring Rules (Suricata)
+# ================================================================
+# Description: Signature-based detection rules for monitoring the IDMZ 
+#   boundary. Detects ICS protocol violations at the boundary, direct 
+#   bypass attempts, and outbound command-and-control patterns from 
+#   OT systems. Deploy on Suricata sensors at IDMZ TAP/SPAN points.
+#
+# ATT&CK for ICS: T0886 (Remote Services), T0822 (External Remote Services),
+#   T0869 (Standard Application Layer Protocol)
+# ICS Kill Chain: Stage 1→2 Boundary Traversal
+# Data Source: Network traffic at IDMZ boundary (TAP/SPAN)
+#
+# Prerequisites:
+#   - Suricata deployed on IDMZ boundary TAP or SPAN port
+#   - Variables configured for local network ranges (see below)
+#   - Adjust $OT_NET, $IT_NET, $IDMZ_NET to match environment
+#
+# Severity: High to Critical — any ICS protocol at the IDMZ is anomalous
+# ================================================================
+
+# ----------------------------------------------------------------
+# VARIABLE DEFINITIONS — Customise for your environment
+# Add these to your suricata.yaml under vars:
+#
+#   vars:
+#     address-groups:
+#       OT_NET: "[10.1.0.0/16]"           # OT network range (L0-L3)
+#       IT_NET: "[10.0.0.0/16]"           # Enterprise IT range (L4-L5)
+#       IDMZ_NET: "[10.2.0.0/24]"         # IDMZ range (L3.5)
+#       JUMP_SERVERS: "[10.2.0.10,10.2.0.11]"  # Jump server IPs
+# ----------------------------------------------------------------
+
+# ================================================================
+# Rule Group 1: ICS Protocol at IDMZ Boundary
+# ICS protocols should NOT traverse the IDMZ. Their presence at this
+# boundary indicates either misconfiguration or adversary activity.
+# ================================================================
+
+# Modbus TCP crossing IDMZ boundary (IT to OT direction)
+alert tcp $IT_NET any -> $OT_NET 502 (msg:"UC-ICS-012 Modbus TCP from IT to OT via IDMZ - Boundary Violation"; flow:to_server,established; content:"|00 00|"; offset:2; depth:2; classtype:policy-violation; sid:9120001; rev:1; metadata:mitre_attack_id T0886, severity Critical, chapter 5;)
+
+# Modbus TCP crossing IDMZ boundary (OT to IT direction — data exfil or misconfiguration)
+alert tcp $OT_NET 502 -> $IT_NET any (msg:"UC-ICS-012 Modbus TCP from OT to IT - Potential Data Exfiltration"; flow:to_client,established; classtype:policy-violation; sid:9120002; rev:1; metadata:mitre_attack_id T0869, severity High, chapter 5;)
+
+# DNP3 crossing IDMZ boundary
+alert tcp $IT_NET any -> $OT_NET 20000 (msg:"UC-ICS-012 DNP3 from IT to OT via IDMZ - Boundary Violation"; flow:to_server,established; content:"|05 64|"; offset:0; depth:2; classtype:policy-violation; sid:9120003; rev:1; metadata:mitre_attack_id T0886, severity Critical, chapter 5;)
+
+# S7Comm (Siemens) crossing IDMZ boundary
+alert tcp $IT_NET any -> $OT_NET 102 (msg:"UC-ICS-012 S7Comm from IT to OT via IDMZ - Boundary Violation"; flow:to_server,established; classtype:policy-violation; sid:9120004; rev:1; metadata:mitre_attack_id T0886, severity Critical, chapter 5;)
+
+# EtherNet/IP (CIP) crossing IDMZ boundary
+alert tcp $IT_NET any -> $OT_NET 44818 (msg:"UC-ICS-012 EtherNet/IP CIP from IT to OT via IDMZ - Boundary Violation"; flow:to_server,established; classtype:policy-violation; sid:9120005; rev:1; metadata:mitre_attack_id T0886, severity Critical, chapter 5;)
+
+# OPC-UA crossing IDMZ boundary from IT (should only originate from IDMZ historian relay)
+alert tcp $IT_NET any -> $OT_NET 4840 (msg:"UC-ICS-012 OPC-UA from IT to OT bypassing IDMZ relay - Boundary Violation"; flow:to_server,established; classtype:policy-violation; sid:9120006; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# BACnet crossing IDMZ boundary
+alert udp $IT_NET any -> $OT_NET 47808 (msg:"UC-ICS-012 BACnet from IT to OT via IDMZ - Boundary Violation"; classtype:policy-violation; sid:9120007; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# ================================================================
+# Rule Group 2: Direct IT-to-OT Bypass (Not via Jump Server)
+# Remote access protocols should only originate from IDMZ jump servers.
+# Direct RDP/SSH from IT to OT bypasses the controlled access path.
+# ================================================================
+
+# RDP from IT directly to OT (bypassing jump server)
+alert tcp $IT_NET any -> $OT_NET 3389 (msg:"UC-ICS-012 Direct RDP from IT to OT bypassing jump server"; flow:to_server,established; classtype:policy-violation; sid:9120010; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# SSH from IT directly to OT
+alert tcp $IT_NET any -> $OT_NET 22 (msg:"UC-ICS-012 Direct SSH from IT to OT bypassing jump server"; flow:to_server,established; classtype:policy-violation; sid:9120011; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# VNC from IT directly to OT
+alert tcp $IT_NET any -> $OT_NET 5900:5910 (msg:"UC-ICS-012 Direct VNC from IT to OT bypassing jump server"; flow:to_server,established; classtype:policy-violation; sid:9120012; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# SMB from IT directly to OT (lateral movement indicator)
+alert tcp $IT_NET any -> $OT_NET 445 (msg:"UC-ICS-012 SMB from IT to OT - Potential Lateral Movement"; flow:to_server,established; classtype:policy-violation; sid:9120013; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# WinRM from IT directly to OT
+alert tcp $IT_NET any -> $OT_NET 5985:5986 (msg:"UC-ICS-012 WinRM from IT to OT - Potential Remote Execution"; flow:to_server,established; classtype:policy-violation; sid:9120014; rev:1; metadata:mitre_attack_id T0886, severity High, chapter 5;)
+
+# ================================================================
+# Rule Group 3: Outbound C2 Indicators from OT Systems
+# OT systems should not initiate connections to the internet.
+# Outbound HTTP/HTTPS/DNS from OT to internet indicates potential C2.
+# ================================================================
+
+# HTTP from OT to internet (should not happen — patches via IDMZ relay)
+alert tcp $OT_NET any -> ![$IT_NET,$IDMZ_NET,$OT_NET] 80 (msg:"UC-ICS-012 HTTP from OT to external - Potential C2"; flow:to_server,established; classtype:trojan-activity; sid:9120020; rev:1; metadata:mitre_attack_id T0869, severity Critical, chapter 5;)
+
+# HTTPS from OT to internet
+alert tcp $OT_NET any -> ![$IT_NET,$IDMZ_NET,$OT_NET] 443 (msg:"UC-ICS-012 HTTPS from OT to external - Potential C2"; flow:to_server,established; classtype:trojan-activity; sid:9120021; rev:1; metadata:mitre_attack_id T0869, severity Critical, chapter 5;)
+
+# DNS from OT to external DNS (OT should use internal DNS only)
+alert udp $OT_NET any -> ![$IT_NET,$IDMZ_NET,$OT_NET] 53 (msg:"UC-ICS-012 DNS from OT to external - Potential C2 or Misconfiguration"; classtype:policy-violation; sid:9120022; rev:1; metadata:mitre_attack_id T0869, severity High, chapter 5;)
+
+# ================================================================
+# Rule Group 4: Suspicious IDMZ Activity
+# Detect anomalous behaviour on IDMZ systems themselves.
+# ================================================================
+
+# Port scan from IDMZ into OT network (reconnaissance)
+alert tcp $IDMZ_NET any -> $OT_NET any (msg:"UC-ICS-012 Port scan from IDMZ to OT network"; flags:S; threshold:type threshold, track by_src, count 20, seconds 60; classtype:attempted-recon; sid:9120030; rev:1; metadata:mitre_attack_id T0846, severity High, chapter 5;)
+
+# ICMP sweep from IDMZ into OT network (host discovery)
+alert icmp $IDMZ_NET any -> $OT_NET any (msg:"UC-ICS-012 ICMP sweep from IDMZ to OT network"; itype:8; threshold:type threshold, track by_src, count 10, seconds 60; classtype:attempted-recon; sid:9120031; rev:1; metadata:mitre_attack_id T0846, severity Medium, chapter 5;)

@@ -1,0 +1,22 @@
+// Assess Windows Event Log coverage for known OT assets
+// Cross-references the OT Asset Register with actual log ingestion
+let OT_Assets = _GetWatchlist('OT_AssetRegister')
+| where OS startswith "Windows"
+| project Hostname, IPAddress, PurdueLevel, DeviceType, CrownJewelTier;
+let LoggingAssets = SecurityEvent
+| where TimeGenerated > ago(7d)
+| summarize LastLogReceived = max(TimeGenerated),
+EventCount = count(),
+EventIDs = make_set(EventID, 20)
+by Computer
+| project Computer, LastLogReceived, EventCount, EventIDs;
+OT_Assets
+| join kind=leftouter LoggingAssets on $left.Hostname ==
+$right.Computer
+| extend LogStatus = iff(isnotempty(LastLogReceived), "Logging",
+"No Logs")
+| extend HasSysmon = iff(EventIDs has "1" and EventIDs has "3",
+"Yes", "No")
+| project Hostname, IPAddress, PurdueLevel, DeviceType, CrownJewelTier,
+LogStatus, LastLogReceived, HasSysmon
+| sort by CrownJewelTier asc, PurdueLevel asc

@@ -1,0 +1,115 @@
+// Chapter 7: Telemetry Gap Assessment Query
+// ================================================================
+// Description: Cross-references the OT_AssetRegister watchlist with
+//   actual telemetry ingestion in Microsoft Sentinel to identify
+//   which OT assets — particularly crown jewel-adjacent systems —
+//   lack adequate monitoring coverage.
+//
+// Purpose: Supports Practical Step 1 (Inventory Current Telemetry
+//   Sources) and provides a data-driven foundation for prioritising
+//   telemetry deployment in Practical Step 4.
+//
+// Prerequisites:
+//   - OT_AssetRegister watchlist populated (Chapter 6)
+//   - At least some OT systems forwarding logs to Sentinel
+//
+// Output: One row per OT asset showing:
+//   - Whether Windows Event Logs are being received
+//   - Whether Sysmon data is being received
+//   - Whether EDR telemetry is being received
+//   - Whether the asset appears in network monitoring data
+//   - An overall coverage score and identified gaps
+//
+// Usage: Run quarterly and after every new telemetry deployment.
+//   Share results with OT engineering and SOC leadership to drive
+//   investment in closing visibility gaps on crown jewel assets.
+// ================================================================
+
+let AssessmentWindow = 7d;
+// Step 1: Get all OT assets from the register
+let OT_Assets = _GetWatchlist('OT_AssetRegister')
+    | project Hostname, IPAddress, PurdueLevel, DeviceType, 
+        CrownJewelTier, OS, EngineeringOwner;
+// Step 2: Check Windows Security Event Log ingestion
+let WinEventCoverage = SecurityEvent
+    | where TimeGenerated > ago(AssessmentWindow)
+    | summarize 
+        WinEventLastSeen = max(TimeGenerated),
+        WinEventCount = count(),
+        WinEventIDs = make_set(EventID, 25)
+        by Computer
+    | project Computer, WinEventLastSeen, WinEventCount, WinEventIDs;
+// Step 3: Check Sysmon ingestion (Event IDs 1, 3, 7, 11, 13, 22)
+let SysmonCoverage = Event
+    | where TimeGenerated > ago(AssessmentWindow)
+    | where Source == "Microsoft-Windows-Sysmon"
+    | summarize
+        SysmonLastSeen = max(TimeGenerated),
+        SysmonEventCount = count(),
+        SysmonEventIDs = make_set(EventID, 10)
+        by Computer
+    | project Computer, SysmonLastSeen, SysmonEventCount, SysmonEventIDs;
+// Step 4: Check EDR telemetry ingestion
+// Adjust table name based on your EDR: DeviceEvents (MDE),
+// or equivalent for CrowdStrike/SentinelOne
+let EDRCoverage = DeviceEvents
+    | where TimeGenerated > ago(AssessmentWindow)
+    | summarize
+        EDRLastSeen = max(TimeGenerated),
+        EDREventCount = count()
+        by DeviceName
+    | project DeviceName, EDRLastSeen, EDREventCount;
+// Step 5: Check network monitoring coverage
+// Asset appears as source or destination in network session data
+let NetworkCoverage = _Im_NetworkSession(starttime=ago(AssessmentWindow))
+    | where isnotempty(SrcIpAddr) and isnotempty(DstIpAddr)
+    | extend IP = pack_array(SrcIpAddr, DstIpAddr)
+    | mv-expand IP to typeof(string)
+    | summarize
+        NetMonLastSeen = max(TimeGenerated),
+        NetMonSessionCount = count()
+        by IP
+    | project IP, NetMonLastSeen, NetMonSessionCount;
+// Step 6: Join everything together
+OT_Assets
+| join kind=leftouter WinEventCoverage on $left.Hostname == $right.Computer
+| join kind=leftouter SysmonCoverage on $left.Hostname == $right.Computer
+| join kind=leftouter EDRCoverage on $left.Hostname == $right.DeviceName
+| join kind=leftouter NetworkCoverage on $left.IPAddress == $right.IP
+// Step 7: Calculate coverage status
+| extend
+    HasWinEvents = iff(isnotempty(WinEventLastSeen), true, false),
+    HasSysmon = iff(isnotempty(SysmonLastSeen), true, false),
+    HasEDR = iff(isnotempty(EDRLastSeen), true, false),
+    HasNetMon = iff(isnotempty(NetMonLastSeen), true, false)
+// Step 8: Calculate coverage score (0-4)
+| extend CoverageScore = toint(HasWinEvents) + toint(HasSysmon) 
+    + toint(HasEDR) + toint(HasNetMon)
+// Step 9: Determine coverage level
+| extend CoverageLevel = case(
+    CoverageScore >= 4, "Full",
+    CoverageScore == 3, "Good",
+    CoverageScore == 2, "Partial",
+    CoverageScore == 1, "Minimal",
+    "None")
+// Step 10: Identify specific gaps
+| extend Gaps = strcat(
+    iff(not(HasWinEvents) and OS startswith "Windows", "WinEventLogs; ", ""),
+    iff(not(HasSysmon) and OS startswith "Windows", "Sysmon; ", ""),
+    iff(not(HasEDR) and DeviceType in ("EngWorkstation", "HMI", "Historian", 
+        "SCADA_Server", "JumpServer"), "EDR; ", ""),
+    iff(not(HasNetMon), "NetworkMonitoring; ", ""))
+// Step 11: Determine deployment priority
+| extend DeploymentPriority = case(
+    CrownJewelTier == "Tier1" and CoverageLevel in ("None", "Minimal"), "CRITICAL",
+    CrownJewelTier == "Tier1" and CoverageLevel == "Partial", "High",
+    CrownJewelTier == "Tier2" and CoverageLevel in ("None", "Minimal"), "High",
+    CrownJewelTier in ("Tier1", "Tier2") and CoverageLevel == "Good", "Medium",
+    CoverageLevel in ("None", "Minimal"), "Medium",
+    "Low")
+// Output
+| project Hostname, IPAddress, PurdueLevel, DeviceType, CrownJewelTier,
+    OS, HasWinEvents, HasSysmon, HasEDR, HasNetMon,
+    CoverageScore, CoverageLevel, Gaps, DeploymentPriority,
+    EngineeringOwner
+| sort by DeploymentPriority asc, CrownJewelTier asc, CoverageScore asc
