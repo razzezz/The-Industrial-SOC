@@ -20,10 +20,7 @@ A full audit of referenced vs. present assets, naming inconsistencies, and struc
 ## Repository Structure
 
 ```
-Book/GitHub Assets/
 ├── README.md
-├── ASSET_AUDIT_REPORT.md
-├── DRAFT_FIND_REPLACE.md   Pending find-and-replace operations for ICS SOC - Structure B.docx
 ├── Chapter_01/   Defining the Industrial Landscape
 ├── Chapter_02/   The IT vs. OT Divergence
 ├── Chapter_03/   Case Studies of Landmark Incidents
